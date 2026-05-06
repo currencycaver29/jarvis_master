@@ -71,11 +71,17 @@ class ShailCoreRouter:
             task_id = str(uuid.uuid4())[:8]
         
         try:
-            # Step 1: Routing decision using Master Planner
+            # Step 1: Routing decision — classifier first, master planner as fallback
             routing_start = time.time()
-            decision = self.master_planner.route_request(req)
+            from shail.core.task_classifier import classify
+            from shail.core.types import RoutingDecision
+            slot = classify(req.text or "")
+            if slot == "code.agent":
+                decision = RoutingDecision(agent="code", confidence=1.0, rationale="task_classifier")
+            else:
+                decision = self.master_planner.route_request(req)
             routing_time = time.time() - routing_start
-            
+
             if routing_time < 0.01:  # Fast keyword routing
                 print(f"[Router] Task {task_id}: Fast routing → {decision.agent} ({routing_time*1000:.1f}ms)")
             else:  # LLM routing

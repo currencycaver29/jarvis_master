@@ -86,3 +86,32 @@ whisper/
 # Large database/index files
 *.mdb
 *.xcindex
+
+# --- Custom Ignore Rules for AI Export ---
+# Secrets
+client_secret_*.json
+
+# Databases
+*.sqlite3-*
+rag_chroma/
+shail_memory.sqlite3*
+
+# Documents (Personal/Irrelevant)
+*.pdf
+*.docx
+*.pages
+
+# AI tools
+.claude/
+.cursor/
+
+# Virtual Environments
+.pdfenv/
+services_env/
+
+# Caches and runtime
+.pytest_cache/
+run/
+graph.json
+shail_audit.jsonl
+logs/

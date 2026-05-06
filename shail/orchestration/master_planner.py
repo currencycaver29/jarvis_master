@@ -17,7 +17,7 @@ import time
 import threading
 from typing import Optional, List, Dict, Any
 
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_ollama import ChatOllama
 from shail.core.types import (
     TaskRequest,
     RoutingDecision,
@@ -45,10 +45,9 @@ class MasterPlanner:
     
     def __init__(self):
         settings = get_settings()
-        self.llm = ChatGoogleGenerativeAI(
-            model=settings.gemini_model,
-            google_api_key=settings.gemini_api_key or None,
-            temperature=0.3  # Lower temperature for consistent routing decisions
+        self.llm = ChatOllama(
+            model=settings.ollama_chat_model,
+            temperature=0.3,
         )
         self.agent_capabilities = format_capabilities_for_llm()
         self.available_agents = list_all_agents()
@@ -521,8 +520,8 @@ Return ONLY the JSON object, no other text:"""
 
     def _format_llm_error(self, exc: Exception) -> str:
         settings = get_settings()
-        if not settings.gemini_api_key:
-            return "Missing API Key (GEMINI_API_KEY is empty)"
+        if not settings.ollama_base_url:
+            return "Ollama not configured (check OLLAMA_BASE_URL)"
         message = str(exc)
         if "timed out" in message.lower():
             return f"Timeout: {message}"

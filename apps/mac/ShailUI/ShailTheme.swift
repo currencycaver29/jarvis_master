@@ -31,11 +31,11 @@ enum ShailTheme {
     static let chatWidth:     CGFloat = 460
 
     // MARK: - Surface helpers
+
+    /// Pure macOS vibrancy — no colour tint so the window looks identical to
+    /// native glassmorphic panels (Notification Centre, Control Centre, etc.).
     static func glassBackground(material: NSVisualEffectView.Material = .hudWindow) -> some View {
-        ZStack {
-            VisualEffectBlur(material: material, blendingMode: .behindWindow)
-            subtleTopGradient
-        }
+        VisualEffectBlur(material: material, blendingMode: .behindWindow)
     }
 
     static func glassStroke(radius: CGFloat = cornerRadius) -> some View {

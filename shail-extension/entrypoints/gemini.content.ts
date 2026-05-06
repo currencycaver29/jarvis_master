@@ -1,4 +1,5 @@
-import { buildAiCandidate, observeWithStability, sendCapture } from '../src/lib/capture';
+import { buildAiCandidate, isCaptureAllowed, makeCaptureId, observeWithStability, sendCapture } from '../src/lib/capture';
+import { extractTranscript } from '../src/lib/conversation-extractor';
 import { scoreContent } from '../src/lib/importance';
 import { showCapturePrompt } from '../src/lib/notify';
 
@@ -29,14 +30,6 @@ export default defineContentScript({
       '[class*="QueryText"]',
     ];
 
-    function queryLast(selectors: string[]): HTMLElement | null {
-      for (const sel of selectors) {
-        const els = document.querySelectorAll(sel);
-        if (els.length) return els[els.length - 1] as HTMLElement;
-      }
-      return null;
-    }
-
     function isStreaming(): boolean {
       return !!(
         document.querySelector('.loading-indicator') ||
@@ -46,30 +39,43 @@ export default defineContentScript({
     }
 
     async function tryCapture() {
+      if (!await isCaptureAllowed(location.href)) return;
       if (isStreaming()) return;
 
-      const responseEl = queryLast(RESPONSE_SELECTORS);
-      if (!responseEl) return;
+      const transcript = extractTranscript({
+        userSelectors: QUERY_SELECTORS,
+        assistantSelectors: RESPONSE_SELECTORS,
+        maxTurns: 10,
+      });
+      if (!transcript) return;
 
-      const assistantText = responseEl.innerText.trim();
-      if (!assistantText || assistantText === lastSeenText) return;
+      if (!transcript.latestAssistantText || transcript.latestAssistantText === lastSeenText) return;
+      lastSeenText = transcript.latestAssistantText;
 
-      lastSeenText = assistantText;
-
-      const { bucket } = scoreContent(assistantText);
+      const { bucket } = scoreContent(transcript.latestAssistantText);
       if (bucket === 'skip') return;
 
-      const queryEl  = queryLast(QUERY_SELECTORS);
-      const userText = queryEl?.innerText.trim() ?? '';
+      const assistantPayload = transcript.turnCount > 0
+        ? transcript.assistantText
+        : transcript.latestAssistantText;
+      const userText = transcript.userText;
 
       async function doCapture() {
-        if (assistantText === lastCapturedText) return;
-        lastCapturedText = assistantText;
-        const candidate = await buildAiCandidate({ sourceApp: 'gemini', userText, assistantText });
+        if (transcript.latestAssistantText === lastCapturedText) return;
+        lastCapturedText = transcript.latestAssistantText;
+        const candidate = await buildAiCandidate({
+          sourceApp: 'gemini',
+          userText,
+          assistantText: assistantPayload,
+        });
         await sendCapture(candidate);
       }
 
-      // Always show the prompt — never auto-save silently.
+      const cid = await makeCaptureId(location.href, assistantPayload);
+      const stored = await browser.storage.local.get('shail_doc_index');
+      const index = (stored['shail_doc_index'] as Array<{ customId?: string }>) ?? [];
+      if (index.some(e => e.customId === cid)) return;
+
       showCapturePrompt({
         title:     userText || document.title,
         sourceApp: 'gemini',

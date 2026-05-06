@@ -66,16 +66,6 @@ class WindowManager: ObservableObject {
         isVisible = true
     }
 
-    /// Expands panel to offline dashboard size and shows it
-    func showOfflineDashboard() {
-        guard let panel = panel else { return }
-        isLauncherMode = false
-        animatePanel(panel, to: frameForOfflineDashboard())
-        panel.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        isVisible = true
-    }
-
     /// Shows the panel
     func show() {
         guard let panel = panel else { return }
@@ -179,6 +169,14 @@ class WindowManager: ObservableObject {
         self.hostingView = hostingView
     }
     
+    /// Animate the panel to chat-overlay dimensions (taller for message list).
+    func expandToChatOverlay() {
+        guard let panel else { return }
+        animatePanel(panel, to: frameForChat())
+        panel.orderFront(nil)
+        isVisible = true
+    }
+
     private func sizeForMode(isLauncher: Bool) -> CGSize {
         if isLauncher {
             return CGSize(width: 60, height: 60)
@@ -199,18 +197,18 @@ class WindowManager: ObservableObject {
         return NSRect(x: x, y: y, width: size.width, height: size.height)
     }
 
-    private func frameForOfflineDashboard() -> NSRect {
+    private func frameForChat() -> NSRect {
         guard let screen = NSScreen.main else {
-            return NSRect(x: 0, y: 0, width: 900, height: 600)
+            return NSRect(x: 0, y: 0, width: 500, height: 640)
         }
         let screenRect = screen.visibleFrame
-        let width: CGFloat = 900
-        let height: CGFloat = 600
-        let x = screenRect.midX - width / 2
-        let y = screenRect.midY - height / 2
-        return NSRect(x: x, y: y, width: width, height: height)
+        let w: CGFloat = 500
+        let h: CGFloat = 640
+        let x = screenRect.maxX - w - 20
+        let y = screenRect.minY + 20
+        return NSRect(x: x, y: y, width: w, height: h)
     }
-    
+
     private func positionPanel(_ panel: NSPanel) {
         panel.setFrame(frameForMode(isLauncher: isLauncherMode), display: false)
     }

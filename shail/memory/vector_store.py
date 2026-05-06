@@ -171,14 +171,37 @@ class PgVectorStore(VectorStore):
 class ChromaVectorStore(VectorStore):
     """Chroma fallback store (persisted locally)."""
 
-    def __init__(self, persist_path: str):
+    def __init__(self, persist_path: str, collection_name: str = "shail_rag"):
         import chromadb
 
         self.client = chromadb.PersistentClient(path=persist_path)
+        self._persist_path = persist_path
         self.collection = self.client.get_or_create_collection(
-            name="shail_rag",
+            name=collection_name,
             metadata={"hnsw:space": "cosine"},
         )
+
+    def get_collection(self, name: str) -> "ChromaVectorStore":
+        """Return a view of this store using a different collection."""
+        store = ChromaVectorStore.__new__(ChromaVectorStore)
+        store.client = self.client
+        store._persist_path = self._persist_path
+        store.collection = self.client.get_or_create_collection(
+            name=name,
+            metadata={"hnsw:space": "cosine"},
+        )
+        return store
+
+    def count(self, namespace: Optional[str] = None) -> int:
+        if namespace:
+            return self.collection.count()
+        return self.collection.count()
+
+    def delete_by_filter(self, where: Dict[str, Any]) -> None:
+        results = self.collection.get(where=where, include=[])
+        ids = results.get("ids", [])
+        if ids:
+            self.collection.delete(ids=ids)
 
     def upsert(self, records: List[EmbeddingRecord]) -> List[str]:
         if not records:

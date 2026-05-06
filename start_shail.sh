@@ -3,7 +3,8 @@
 # Unified one-click startup for SHAIL
 #
 # Features:
-# - Loads .env (GEMINI_API_KEY, etc.)
+# - Loads .env
+# - Starts Ollama + pulls required models
 # - Ensures Python venv and dependencies
 # - Starts native services (if on macOS)
 # - Starts Redis, Python services, API, worker
@@ -79,6 +80,31 @@ for svc in ui_twin action_executor vision rag_retriever planner; do
 done
 log "Dependencies ready"
 
+# Start Ollama if not running
+if check_port 11434; then
+  log "Ollama already running on 11434"
+else
+  if command -v ollama >/dev/null 2>&1; then
+    log "Starting Ollama"
+    # Heat / RAM caps: never keep both chat + vision resident, single
+    # concurrent infer. Reduces fan ramp on M-series.
+    export OLLAMA_MAX_LOADED_MODELS="${OLLAMA_MAX_LOADED_MODELS:-1}"
+    export OLLAMA_NUM_PARALLEL="${OLLAMA_NUM_PARALLEL:-1}"
+    export OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-5m}"
+    ollama serve >"$LOG_DIR/ollama.log" 2>&1 &
+    echo $! >"$PID_DIR/ollama.pid"
+    wait_for_port "Ollama" 11434
+    log "Pulling required models (this may take a while on first run)"
+    # Sprint 6: switched chat default to quantized Gemma 3 4B (Q4_K_M).
+    # Saves ~7 GB resident vs. gemma4:e4b. Vision deferred — Ghost Cursor
+    # pulls llava:7b on first use only.
+    ollama pull gemma3:4b-it-q4_K_M --quiet || true
+    ollama pull nomic-embed-text --quiet || true
+  else
+    log "WARNING: ollama not found. Install from https://ollama.com"
+  fi
+fi
+
 # Start Redis if not running
 if check_port 6379; then
   log "Redis already running on 6379"
@@ -101,6 +127,28 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     echo $! >"$PID_DIR/native.pid"
   else
     log "run_native_services.sh not found. Open Xcode projects manually if needed."
+  fi
+
+  # Build + install + start MemoryWatchdog (Swift CLI, menu bar app)
+  # NOTE: launches from ~/Applications/SHAIL/MemoryWatchdog (stable path) so
+  # macOS Accessibility / Screen Recording grants survive rebuilds. See
+  # scripts/install_watchdog.sh for why.
+  WATCHDOG_DIR="$ROOT/native/mac/MemoryWatchdog"
+  WATCHDOG_INSTALLED="$HOME/Applications/SHAIL/MemoryWatchdog"
+  if [ -d "$WATCHDOG_DIR" ] && command -v swift >/dev/null 2>&1; then
+    log "Building MemoryWatchdog…"
+    if (cd "$WATCHDOG_DIR" && swift build -c release --quiet); then
+      bash "$ROOT/scripts/install_watchdog.sh" >>"$LOG_DIR/memory_watchdog.log" 2>&1 || true
+      if [ -f "$WATCHDOG_INSTALLED" ]; then
+        log "Starting MemoryWatchdog (installed path)"
+        "$WATCHDOG_INSTALLED" >>"$LOG_DIR/memory_watchdog.log" 2>&1 &
+        echo $! >"$PID_DIR/memory_watchdog.pid"
+      else
+        log "MemoryWatchdog install failed — check $LOG_DIR/memory_watchdog.log"
+      fi
+    else
+      log "MemoryWatchdog build failed — check $LOG_DIR/memory_watchdog.log"
+    fi
   fi
 fi
 
@@ -136,12 +184,23 @@ start_service "planner" "$ROOT/services/planner" "python service.py" 8083
 
 # Start Shail API
 log "Starting Shail API"
-pushd "$ROOT/apps/shail" >/dev/null
-uvicorn main:app --host 0.0.0.0 --port 8000 >"$LOG_DIR/shail_api.log" 2>&1 &
-API_PID=$!
-popd >/dev/null
-echo $API_PID >"$PID_DIR/shail_api.pid"
-wait_for_port "Shail API" 8000
+if check_port 8000; then
+  log "Port 8000 already in use — assuming Shail API already running"
+else
+  pushd "$ROOT/apps/shail" >/dev/null
+  uvicorn main:app --host 127.0.0.1 --port 8000 >"$LOG_DIR/shail_api.log" 2>&1 &
+  API_PID=$!
+  popd >/dev/null
+  echo $API_PID >"$PID_DIR/shail_api.pid"
+  wait_for_port "Shail API" 8000
+  if ! check_port 8000; then
+    log "✗ Shail API failed to bind — see $LOG_DIR/shail_api.log"
+    log "Last 20 lines:"
+    tail -n 20 "$LOG_DIR/shail_api.log" || true
+    exit 1
+  fi
+  log "Shail API health: $(curl -s http://127.0.0.1:8000/health || echo unreachable)"
+fi
 
 # Start task worker
 log "Starting task worker"

@@ -6,17 +6,16 @@ struct QuickPopupView: View {
     @StateObject private var wsClient        = BackendWebSocketClient()
     @StateObject private var desktopManager  = DesktopManager()
 
-    @State private var query:             String           = ""
-    @State private var isListening:       Bool             = false
-    @State private var isLoading:         Bool             = false
+    @State private var query:             String  = ""
+    @State private var isListening:       Bool    = false
     @State private var nativeHealth:      NativeHealthStatus?
     @State private var pendingPermission: PermissionRequest?
-    @State private var showSettings:      Bool             = false
+    @State private var showSettings:      Bool    = false
+    @State private var showHistory:       Bool    = false
 
-    // MARK: - Ring state derived from live signals
+    // MARK: - Ring state
 
     private var ringState: ShailRingState {
-        if isLoading { return .executing }
         if let status = wsClient.currentState?.status {
             switch status {
             case "planning", "thinking":    return .thinking
@@ -76,13 +75,13 @@ struct QuickPopupView: View {
             )
         }
         .sheet(isPresented: $showSettings) { SettingsView() }
+        .sheet(isPresented: $showHistory)  { ChatHistoryView() }
     }
 
-    // MARK: - Sub-views
+    // MARK: - Header
 
     private var header: some View {
         HStack(alignment: .center) {
-            // Logo wordmark
             HStack(spacing: 5) {
                 Image(systemName: "bolt.fill")
                     .font(.system(size: 12, weight: .bold))
@@ -94,13 +93,12 @@ struct QuickPopupView: View {
 
             Spacer()
 
-            // WS dot + actions + close
             HStack(spacing: 12) {
                 Circle()
                     .fill(wsClient.isConnected ? Color.green : Color.white.opacity(0.25))
                     .frame(width: 6, height: 6)
 
-                // Bird's Eye dashboard
+                // Bird's Eye
                 Button { coordinator.showBirdsEye() } label: {
                     Image(systemName: "network")
                         .font(.system(size: 13))
@@ -109,6 +107,26 @@ struct QuickPopupView: View {
                 .buttonStyle(.plain)
                 .help("Bird's Eye View")
 
+                // Chat History
+                Button { showHistory = true } label: {
+                    ZStack(alignment: .topTrailing) {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.system(size: 13))
+                            .foregroundColor(.white.opacity(0.55))
+                        // Badge if there are sessions
+                        if !ChatStore.shared.sessions.isEmpty {
+                            Circle()
+                                .fill(ShailTheme.primaryBlue)
+                                .frame(width: 5, height: 5)
+                                .offset(x: 3, y: -3)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+                .help("Chat history")
+
+                UserProfileChip()
+
                 Button { showSettings = true } label: {
                     Image(systemName: "gearshape")
                         .font(.system(size: 13))
@@ -116,15 +134,6 @@ struct QuickPopupView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Settings")
-
-                // Minimize — hides the panel (click ⚡ in menubar to reopen)
-                Button { coordinator.hidePanel?() } label: {
-                    Image(systemName: "minus")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(.white.opacity(0.4))
-                }
-                .buttonStyle(.plain)
-                .help("Minimize")
 
                 Button { coordinator.collapseToLauncher?() } label: {
                     Image(systemName: "xmark")
@@ -143,12 +152,10 @@ struct QuickPopupView: View {
     private var ringSection: some View {
         VStack(spacing: 6) {
             ShailStatusRing(state: ringState)
-
             Text(ringState.label)
                 .font(ShailTheme.captionFont)
                 .foregroundColor(.white.opacity(0.5))
                 .animation(.easeInOut(duration: 0.2), value: ringState.label)
-
             Text("Hello Reyhan")
                 .font(ShailTheme.titleFont)
                 .foregroundColor(.white)
@@ -172,13 +179,8 @@ struct QuickPopupView: View {
             .font(.system(size: 16, design: .rounded))
             .foregroundColor(.white)
             .onSubmit { submitQuery() }
-            .disabled(isLoading)
 
-            if isLoading {
-                ProgressView()
-                    .scaleEffect(0.65)
-                    .tint(ShailTheme.primaryBlue)
-            } else if !query.isEmpty {
+            if !query.isEmpty {
                 Button { submitQuery() } label: {
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.system(size: 22))
@@ -187,9 +189,7 @@ struct QuickPopupView: View {
                 .buttonStyle(.plain)
             }
 
-            Button {
-                isListening.toggle()
-            } label: {
+            Button { isListening.toggle() } label: {
                 Image(systemName: isListening ? "mic.fill" : "mic")
                     .font(.system(size: 14))
                     .foregroundColor(isListening ? ShailTheme.primaryBlue : .white.opacity(0.4))
@@ -230,7 +230,7 @@ struct QuickPopupView: View {
     }
 
     private var tipLine: some View {
-        Text("3-finger swipe up → Bird's-Eye Workflow")
+        Text("3-finger swipe up → Bird's-Eye  ·  clock → chat history")
             .font(ShailTheme.captionFont)
             .foregroundColor(.white.opacity(0.25))
             .padding(.bottom, 14)
@@ -242,52 +242,35 @@ struct QuickPopupView: View {
         }
     }
 
-    // MARK: - Actions
+    // MARK: - Submit (THE FIX: switch immediately, stream in ChatOverlayView)
 
     private func submitQuery() {
-        guard !query.isEmpty, !isLoading else { return }
+        guard !query.isEmpty else { return }
 
-        // Offline path — no backend available
+        let text = query
+        query = ""
+
+        // Offline path
         if !backendManager.isAvailable {
-            let text = query
-            query = ""
             coordinator.messages.append(ChatMessage(text: text, role: .user))
             coordinator.messages.append(ChatMessage(text: MockDataProvider.offlineReply, role: .assistant))
             coordinator.lastChatResponse = MockDataProvider.offlineReply
-            coordinator.showOfflineDashboard()
+            coordinator.showConversationInDashboard = true
+            coordinator.showBirdsEye()
             return
         }
 
-        isLoading = true
-        let text  = query
-        query = ""
-
-        Task {
-            do {
-                let desktopId    = desktopManager.activeDesktop
-                let taskResponse = try await TaskService.shared.submitTask(text: text, mode: "auto", desktopId: desktopId)
-                let chatResponse = try await ChatService.shared.sendMessage(text)
-
-                await MainActor.run {
-                    isLoading = false
-                    coordinator.activeTaskId = taskResponse.task_id
-                    coordinator.messages.append(ChatMessage(text: text,              role: .user))
-                    coordinator.messages.append(ChatMessage(text: chatResponse.text, role: .assistant))
-                    coordinator.lastChatResponse = chatResponse.text
-                    coordinator.showChat()
-                }
-            } catch {
-                let reply = MockDataProvider.errorReply(for: error)
-                await MainActor.run {
-                    isLoading = false
-                    coordinator.messages.append(ChatMessage(text: text,  role: .user))
-                    coordinator.messages.append(ChatMessage(text: reply, role: .assistant))
-                    coordinator.lastChatResponse = reply
-                    coordinator.showOfflineDashboard()
-                }
-            }
-        }
+        // ── THE FIX ──────────────────────────────────────────────────────────
+        // 1. Append user message NOW (visible immediately in chat)
+        // 2. Set pendingQuery so ChatOverlayView starts streaming on appear
+        // 3. Switch to chat overlay immediately — user sees chat + streaming
+        // Do NOT wait for LLM response before switching.
+        coordinator.messages.append(ChatMessage(text: text, role: .user))
+        coordinator.pendingQuery = text
+        coordinator.showChatExpanded()
     }
+
+    // MARK: - Helpers
 
     private func checkNativeHealth() {
         Task {

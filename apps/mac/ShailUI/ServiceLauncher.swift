@@ -8,6 +8,10 @@ class ServiceLauncher: ObservableObject {
 
     @Published var isRunning: Bool = false
     @Published var statusMessage: String = "Stopped"
+    /// Last 30 lines of stdout/stderr from start_shail.sh — surfaced in offline UI.
+    @Published var lastError: String = ""
+    /// Last /health response body — populated after waitForHealth succeeds or fails.
+    @Published var lastHealthSnapshot: String = ""
 
     private let userDefaultsKey = "shail_repo_root"
 
@@ -43,19 +47,124 @@ class ServiceLauncher: ObservableObject {
             statusMessage = "Repo path not found — configure in Settings"
             return
         }
-        statusMessage = "Starting services…"
-        runScript("start_shail.sh") { [weak self] success in
-            self?.isRunning = success
-            self?.statusMessage = success ? "Running" : "Failed to start"
+        if isPort8000InUse() {
+            // Backend already running — delegate remaining services to the API
+            isRunning = true
+            statusMessage = "Running"
+            startManagedServicesViaAPI()
+            return
         }
+        // Cold start: launch FastAPI first via script, then delegate the rest
+        statusMessage = "Starting services…"
+        lastError = ""
+        runScript("start_shail.sh") { [weak self] success, output in
+            guard let self else { return }
+            let lines = output.components(separatedBy: "\n")
+            let tail = lines.suffix(30).joined(separator: "\n")
+            DispatchQueue.main.async { self.lastError = tail }
+            if success {
+                self.waitForHealth()
+            } else {
+                DispatchQueue.main.async {
+                    self.isRunning = false
+                    self.statusMessage = "Failed to start — see details below"
+                }
+            }
+        }
+    }
+
+    /// Called after FastAPI is confirmed healthy — delegates Ollama + worker start to /system/start.
+    private func startManagedServicesViaAPI() {
+        guard let url = URL(string: "http://localhost:8000/system/start") else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        if let key = UserDefaults.standard.string(forKey: "shail_api_key") {
+            req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        }
+        // Fire-and-forget; BackendManager.check() will pick up per-service status on next tick
+        URLSession.shared.dataTask(with: req) { _, _, _ in
+            DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
+                BackendManager.shared.check()
+            }
+        }.resume()
     }
 
     func stopAll() {
         guard hasValidPath else { return }
-        statusMessage = "Stopping…"
-        runScript("stop_shail.sh") { [weak self] _ in
-            self?.isRunning = false
-            self?.statusMessage = "Stopped"
+        statusMessage = "Stopping managed services…"
+        // First: stop Ollama + worker via API
+        if isPort8000InUse(), let url = URL(string: "http://localhost:8000/system/stop") {
+            var req = URLRequest(url: url)
+            req.httpMethod = "POST"
+            if let key = UserDefaults.standard.string(forKey: "shail_api_key") {
+                req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            }
+            let sem = DispatchSemaphore(value: 0)
+            URLSession.shared.dataTask(with: req) { _, _, _ in sem.signal() }.resume()
+            sem.wait(timeout: .now() + 5)
+        }
+        // Then: stop FastAPI itself via script
+        statusMessage = "Stopping backend…"
+        runScript("stop_shail.sh") { [weak self] _, _ in
+            // Belt-and-suspenders: ensure uvicorn is dead
+            let kill = Process()
+            kill.launchPath = "/usr/bin/pkill"
+            kill.arguments = ["-f", "uvicorn"]
+            kill.standardOutput = Pipe()
+            kill.standardError  = Pipe()
+            try? kill.run()
+            kill.waitUntilExit()
+            DispatchQueue.main.async {
+                self?.isRunning = false
+                self?.statusMessage = "Stopped"
+            }
+        }
+    }
+
+    // MARK: - Private health helpers
+
+    private func isPort8000InUse() -> Bool {
+        let task = Process()
+        task.launchPath = "/usr/bin/lsof"
+        task.arguments  = ["-ti", ":8000"]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError  = Pipe()
+        guard (try? task.run()) != nil else { return false }
+        task.waitUntilExit()
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func waitForHealth(attempts: Int = 0) {
+        guard attempts < 20 else {
+            DispatchQueue.main.async {
+                self.isRunning = false
+                self.statusMessage = "Backend not responding after start"
+            }
+            return
+        }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let url = URL(string: "http://127.0.0.1:8000/health") else { return }
+            let sem = DispatchSemaphore(value: 0)
+            var ok  = false
+            var bodyStr = ""
+            URLSession.shared.dataTask(with: url) { data, resp, _ in
+                ok = (resp as? HTTPURLResponse).map { (200...299).contains($0.statusCode) } ?? false
+                if let data = data { bodyStr = String(data: data, encoding: .utf8) ?? "" }
+                sem.signal()
+            }.resume()
+            sem.wait()
+            if ok {
+                DispatchQueue.main.async {
+                    self?.isRunning = true
+                    self?.statusMessage = "Running"
+                    self?.lastHealthSnapshot = bodyStr
+                }
+                self?.startManagedServicesViaAPI()
+            } else {
+                self?.waitForHealth(attempts: attempts + 1)
+            }
         }
     }
 
@@ -80,10 +189,10 @@ class ServiceLauncher: ObservableObject {
         FileManager.default.isExecutableFile(atPath: path + "/start_shail.sh")
     }
 
-    private func runScript(_ name: String, completion: @escaping (Bool) -> Void) {
+    private func runScript(_ name: String, completion: @escaping (Bool, String) -> Void) {
         let scriptPath = repoRoot + "/" + name
         guard FileManager.default.isExecutableFile(atPath: scriptPath) else {
-            DispatchQueue.main.async { completion(false) }
+            DispatchQueue.main.async { completion(false, "Script not found or not executable: \(scriptPath)") }
             return
         }
 
@@ -99,11 +208,13 @@ class ServiceLauncher: ObservableObject {
 
             do {
                 try task.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
                 task.waitUntilExit()
-                DispatchQueue.main.async { completion(task.terminationStatus == 0) }
+                let output = String(data: data, encoding: .utf8) ?? ""
+                DispatchQueue.main.async { completion(task.terminationStatus == 0, output) }
             } catch {
                 NSLog("[ServiceLauncher] Failed to run \(name): \(error)")
-                DispatchQueue.main.async { completion(false) }
+                DispatchQueue.main.async { completion(false, "Exec error: \(error.localizedDescription)") }
             }
         }
     }

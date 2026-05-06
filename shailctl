@@ -1,0 +1,283 @@
+#!/bin/bash
+#
+# shailctl — unified service control for the SHAIL stack.
+#
+# Single entrypoint for starting, stopping, restarting, and inspecting all
+# SHAIL services on this machine. Replaces the proliferation of
+# start_*.sh / stop_*.sh / RESTART_ALL.sh scripts that fell out of sync.
+#
+# Usage:
+#   ./shailctl start          start all services in dependency order
+#   ./shailctl stop           stop all services (tracked PIDs + port fallback)
+#   ./shailctl restart        stop then start
+#   ./shailctl status         show what's running and where
+#   ./shailctl logs <name>    tail a service's log
+#   ./shailctl clean          stop + delete stale PID files + kill zombies
+#
+# Services managed (in dependency order):
+#   ollama (11434) → redis (6379) → ui_twin → action_executor (8080) →
+#   vision (8081) → rag_retriever (8082) → planner (8083) →
+#   shail_api / FastAPI (8000) → task_worker
+#
+# This script is the source of truth. Do not call start_shail.sh /
+# stop_shail.sh directly — they are kept as legacy fallbacks only.
+
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOG_DIR="$ROOT/logs"
+PID_DIR="$ROOT/run"
+mkdir -p "$LOG_DIR" "$PID_DIR"
+
+if [ -t 1 ]; then
+  C_OK="$(printf '\033[32m')"; C_WARN="$(printf '\033[33m')"
+  C_ERR="$(printf '\033[31m')"; C_DIM="$(printf '\033[2m')"
+  C_BOLD="$(printf '\033[1m')"; C_RST="$(printf '\033[0m')"
+else
+  C_OK=""; C_WARN=""; C_ERR=""; C_DIM=""; C_BOLD=""; C_RST=""
+fi
+
+log()  { printf '%s[shail]%s %s\n' "$C_DIM" "$C_RST" "$*"; }
+ok()   { printf '%s✓%s %s\n' "$C_OK" "$C_RST" "$*"; }
+warn() { printf '%s!%s %s\n' "$C_WARN" "$C_RST" "$*"; }
+err()  { printf '%s✗%s %s\n' "$C_ERR" "$C_RST" "$*" >&2; }
+
+# Each entry: name|port|stop_priority(1=first to die, low to high = deps last)
+SERVICES=(
+  "task_worker|0|1"
+  "shail_api|8000|2"
+  "planner|8083|3"
+  "rag_retriever|8082|3"
+  "vision|8081|3"
+  "action_executor|8080|3"
+  "ui_twin|0|3"
+  "memory_watchdog|0|4"
+  "native|0|4"
+  "redis|6379|5"
+  "ollama|11434|6"
+)
+
+port_for() {
+  local name="$1"
+  for s in "${SERVICES[@]}"; do
+    IFS='|' read -r n p _ <<< "$s"
+    if [ "$n" = "$name" ]; then echo "$p"; return; fi
+  done
+  echo 0
+}
+
+is_alive() {
+  local pid="$1"
+  [ -n "$pid" ] && [ "$pid" -gt 0 ] 2>/dev/null && ps -p "$pid" >/dev/null 2>&1
+}
+
+port_pid() {
+  local port="$1"
+  [ "$port" -gt 0 ] 2>/dev/null || { echo ""; return; }
+  lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null | head -1
+}
+
+# ─── stop logic ──────────────────────────────────────────────────────────
+# 1. PID file (fast path).
+# 2. Port-based fallback (catches orphans from previous botched stops).
+# 3. SIGKILL after 4s if SIGTERM didn't take.
+stop_one() {
+  local name="$1"
+  local port="$(port_for "$name")"
+  local pid_file="$PID_DIR/${name}.pid"
+  local killed=0
+
+  if [ -f "$pid_file" ]; then
+    local tpid
+    tpid="$(cat "$pid_file" 2>/dev/null | tr -d '[:space:]')"
+    if is_alive "$tpid"; then
+      log "stopping $name (pid $tpid)"
+      kill "$tpid" 2>/dev/null || true
+      for _ in 1 2 3 4 5 6 7 8; do
+        is_alive "$tpid" || break
+        sleep 0.5
+      done
+      if is_alive "$tpid"; then
+        warn "$name didn't exit on SIGTERM — sending SIGKILL"
+        kill -9 "$tpid" 2>/dev/null || true
+      fi
+      killed=1
+    fi
+    rm -f "$pid_file"
+  fi
+
+  if [ "$port" -gt 0 ] 2>/dev/null; then
+    local opid
+    opid="$(port_pid "$port")"
+    if [ -n "$opid" ]; then
+      log "killing orphan $name on :$port (pid $opid)"
+      kill "$opid" 2>/dev/null || true
+      for _ in 1 2 3 4 5 6; do
+        opid="$(port_pid "$port")"
+        [ -z "$opid" ] && break
+        sleep 0.5
+      done
+      opid="$(port_pid "$port")"
+      if [ -n "$opid" ]; then
+        kill -9 "$opid" 2>/dev/null || true
+      fi
+      killed=1
+    fi
+  fi
+
+  case "$name" in
+    ollama)
+      pkill -x ollama 2>/dev/null && killed=1 || true
+      pkill -f "ollama serve" 2>/dev/null || true
+      ;;
+    task_worker)
+      pkill -f "shail.workers.task_worker" 2>/dev/null && killed=1 || true
+      ;;
+    ui_twin)
+      pkill -f "services/ui_twin/service.py" 2>/dev/null && killed=1 || true
+      ;;
+  esac
+
+  if [ "$killed" -eq 1 ]; then ok "$name stopped"; fi
+}
+
+kill_orphans() {
+  local pids
+  pids="$(pgrep -f "start_shail.sh" 2>/dev/null || true)"
+  if [ -n "$pids" ]; then
+    log "reaping orphan start_shail.sh shells: $pids"
+    # shellcheck disable=SC2086
+    kill $pids 2>/dev/null || true
+    sleep 0.5
+    pids="$(pgrep -f "start_shail.sh" 2>/dev/null || true)"
+    if [ -n "$pids" ]; then
+      # shellcheck disable=SC2086
+      kill -9 $pids 2>/dev/null || true
+    fi
+    ok "orphan shells cleared"
+  fi
+}
+
+cmd_stop() {
+  log "stopping SHAIL stack"
+  local sorted
+  sorted=$(for s in "${SERVICES[@]}"; do
+    IFS='|' read -r n _ pri <<< "$s"
+    printf '%s %s\n' "$pri" "$n"
+  done | sort -n | awk '{print $2}')
+  for name in $sorted; do
+    stop_one "$name"
+  done
+  kill_orphans
+  ok "all services stopped"
+}
+
+cmd_start() {
+  if [ -x "$ROOT/start_shail.sh" ]; then
+    log "starting SHAIL stack via start_shail.sh"
+    "$ROOT/start_shail.sh"
+  else
+    err "start_shail.sh not found or not executable"
+    return 1
+  fi
+}
+
+cmd_restart() {
+  cmd_stop
+  sleep 1
+  cmd_start
+}
+
+cmd_status() {
+  printf '%s%s%s\n' "$C_BOLD" "SHAIL service status" "$C_RST"
+  printf '%-20s %-8s %-20s %-7s %s\n' "SERVICE" "PORT" "STATE" "PID" "SOURCE"
+  printf '%-20s %-8s %-20s %-7s %s\n' "──────" "────" "─────" "───" "──────"
+  for s in "${SERVICES[@]}"; do
+    IFS='|' read -r name port _ <<< "$s"
+    local pid_file="$PID_DIR/${name}.pid"
+    local tpid="" opid="" state="${C_DIM}stopped${C_RST}" source="-"
+    if [ -f "$pid_file" ]; then
+      tpid="$(cat "$pid_file" 2>/dev/null | tr -d '[:space:]')"
+    fi
+    if [ "$port" -gt 0 ] 2>/dev/null; then
+      opid="$(port_pid "$port")"
+    fi
+    if is_alive "$tpid"; then
+      state="${C_OK}running${C_RST}"; source="pid-file"
+    elif [ -n "$opid" ]; then
+      state="${C_WARN}running${C_RST}"; source="port (untracked)"; tpid="$opid"
+    fi
+    printf '%-20s %-8s %-20b %-7s %s\n' \
+      "$name" "${port:-—}" "$state" "${tpid:-—}" "$source"
+  done
+
+  echo
+  if curl -fsS --max-time 1 http://127.0.0.1:8000/health >/dev/null 2>&1; then
+    ok "backend /health responds"
+  else
+    warn "backend /health not responding"
+  fi
+  if curl -fsS --max-time 1 http://localhost:11434/api/tags >/dev/null 2>&1; then
+    ok "ollama /api/tags responds"
+  else
+    warn "ollama not reachable"
+  fi
+}
+
+cmd_logs() {
+  local name="${1:-}"
+  if [ -z "$name" ]; then
+    log "available logs:"
+    ls -1 "$LOG_DIR" 2>/dev/null | sed 's/^/  /' || true
+    return
+  fi
+  local f="$LOG_DIR/${name}.log"
+  if [ ! -f "$f" ]; then
+    err "no log at $f"
+    return 1
+  fi
+  exec tail -f "$f"
+}
+
+cmd_clean() {
+  cmd_stop
+  log "removing stale PID files"
+  rm -f "$PID_DIR"/*.pid 2>/dev/null || true
+  ok "clean complete"
+}
+
+case "${1:-}" in
+  start)        cmd_start ;;
+  stop)         cmd_stop ;;
+  restart)      cmd_restart ;;
+  status|st)    cmd_status ;;
+  logs)         cmd_logs "${2:-}" ;;
+  clean)        cmd_clean ;;
+  ""|-h|--help|help)
+    cat <<EOF
+Usage: ./shailctl <command>
+
+Commands:
+  start              Start the full SHAIL stack
+  stop               Stop everything (tracked + orphaned)
+  restart            Stop then start
+  status             Show running services and ports
+  logs <service>     Tail logs/<service>.log
+  clean              Stop and delete stale PID files
+
+Services in dependency order:
+  ollama → redis → ui_twin → action_executor → vision →
+  rag_retriever → planner → shail_api → task_worker
+
+Examples:
+  ./shailctl status
+  ./shailctl restart
+  ./shailctl logs shail_api
+EOF
+    ;;
+  *)
+    err "unknown command: $1"
+    err "run './shailctl help' for usage"
+    exit 1
+    ;;
+esac

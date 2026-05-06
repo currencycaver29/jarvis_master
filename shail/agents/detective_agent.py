@@ -11,7 +11,7 @@ Features:
 
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_ollama import ChatOllama
 from apps.shail.settings import get_settings
 
 class DetectiveVerdict(BaseModel):
@@ -28,10 +28,9 @@ class AnomalyBiasedDetective:
     
     def __init__(self):
         settings = get_settings()
-        self.llm = ChatGoogleGenerativeAI(
-            model=settings.gemini_model,
-            google_api_key=settings.gemini_api_key or None,
-            temperature=0.1  # Low temperature for analytical rigor
+        self.llm = ChatOllama(
+            model=settings.ollama_chat_model,
+            temperature=0.1,
         )
     
     def investigate(self, code_solution: str, context: str) -> DetectiveVerdict:

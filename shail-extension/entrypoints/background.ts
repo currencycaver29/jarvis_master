@@ -44,7 +44,15 @@ async function storeDocumentId(docId: string, payload: import('../src/types/cont
   // Keep max 200
   if (index.length > MAX_INDEX_SIZE) index.splice(MAX_INDEX_SIZE);
 
-  await browser.storage.local.set({ [KEY_DOC_INDEX]: index });
+  // Also update shail_recent_saves so popup dedup check is instant on next open
+  const recResult = await browser.storage.local.get('shail_recent_saves');
+  const recSaves = (recResult['shail_recent_saves'] as Array<{ url: string; timestamp: string }>) ?? [];
+  recSaves.unshift({ url: payload.sourceUrl, timestamp: payload.timestamp });
+
+  await browser.storage.local.set({
+    [KEY_DOC_INDEX]: index,
+    shail_recent_saves: recSaves.slice(0, 200),
+  });
 }
 
 // ─── Badge helpers ────────────────────────────────────────────────────────────
@@ -158,12 +166,22 @@ async function handleMessage(
       } catch (err) {
         showErrorBadge();
         const rawMsg    = (err as Error).message ?? '';
+        const isOffline = rawMsg === 'BACKEND_OFFLINE' || rawMsg === 'BACKEND_TIMEOUT';
         const friendlyMsg =
           rawMsg === 'BACKEND_OFFLINE'
-            ? 'SHAIL backend is offline — start the app to resume capture'
+            ? 'SHAIL backend is offline — capture queued, will retry'
             : rawMsg === 'BACKEND_TIMEOUT'
-            ? 'Backend timeout — is the SHAIL app running?'
+            ? 'Backend timeout — capture queued, will retry'
             : rawMsg;
+        // If the backend was unreachable, queue the capture for later drain.
+        if (isOffline) {
+          try {
+            const { enqueue } = await import('../src/lib/offlineQueue');
+            await enqueue(message.payload);
+          } catch (qErr) {
+            console.warn('[SHAIL] queue enqueue failed:', qErr);
+          }
+        }
         // Store the error so the Options page can surface it
         await browser.storage.local.set({
           shail_last_capture_error: {
@@ -171,6 +189,11 @@ async function handleMessage(
             timestamp: new Date().toISOString(),
           },
         });
+        if (isOffline) {
+          // Treat queued captures as a soft success so the popup does not
+          // flash a red error — they will drain when the backend comes back.
+          return { ok: true, data: { status: 'denied' } };
+        }
         return { ok: false, error: friendlyMsg };
       }
     }
@@ -207,6 +230,25 @@ async function handleMessage(
       return { ok: true, data: policies };
     }
 
+    case 'FETCH_ASCENT': {
+      try {
+        const data = await api.getAscent(message.payload.id);
+        return { ok: true, data };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+    }
+
+    case 'TOGGLE_TODO': {
+      try {
+        const { ascentId, todoId, completed } = message.payload;
+        const data = await api.toggleTodo(ascentId, todoId, completed);
+        return { ok: true, data };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+    }
+
     default:
       return { ok: false, error: 'Unknown message type' };
   }
@@ -241,6 +283,25 @@ export default defineBackground(() => {
   // CRITICAL: Do NOT use async/await here — Chrome only propagates the user
   // gesture to synchronous code. Using await before sidePanel.open() silently
   // drops the call. Use .then() chains to stay in the gesture context.
+  // ── Periodic offline-queue drain ────────────────────────────────────────
+  // Every 30 s, ping the backend; if up, drain pending captures.
+  const drainTick = async () => {
+    try {
+      const { pingBackend } = await import('../src/lib/api');
+      const { drain, size } = await import('../src/lib/offlineQueue');
+      const queued = await size();
+      if (queued === 0) return;
+      const health = await pingBackend();
+      if (!health.ok) return;
+      await drain(async (payload) => { await api.capture(payload); });
+    } catch (err) {
+      console.warn('[SHAIL] drain tick failed:', err);
+    }
+  };
+  setInterval(drainTick, 30_000);
+  // Kick once at startup so the badge clears fast after a restart
+  setTimeout(drainTick, 3_000);
+
   browser.commands.onCommand.addListener((command) => {
     if (command === 'open-sidepanel') {
       // Signal sidepanel to auto-focus search (fire-and-forget)

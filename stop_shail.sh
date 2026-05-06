@@ -21,6 +21,11 @@ stop_pid() {
 
 # Stop services in reverse order
 stop_pid "task_worker"
+stop_pid "memory_watchdog"
+stop_pid "ollama"
+# Fallback: pkill covers forks + pre-existing Ollama instances
+pkill -x ollama 2>/dev/null || true
+pkill -f "ollama serve" 2>/dev/null || true
 stop_pid "shail_api"
 stop_pid "planner"
 stop_pid "rag_retriever"

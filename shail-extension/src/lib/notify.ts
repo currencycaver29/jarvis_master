@@ -1,53 +1,43 @@
 /**
- * notify.ts — Shadow DOM notification widget for borderline captures.
- *
+ * notify.ts — Shadow DOM capture-prompt toast.
  * Runs inside content scripts (no React, no Tailwind).
- * Uses Shadow DOM so the host page's CSS can't touch it.
+ * Uses Shadow DOM so the host page's CSS cannot touch it.
  *
- * Shows a small card top-right:
- *   "Worth saving? [Save] [Skip]"
- * Auto-dismisses after autoDismissMs (default 8000ms).
+ * Layout:
+ *   ● CHATGPT        SHAIL  ×
+ *   Worth saving this memory?
+ *   --- Saved article: title…
+ *   [💾 Save]  [Capture session ▶]  [Skip]
+ *   ▬▬▬▬▬▬ auto-dismiss progress bar
  */
 
 import type { SourceApp } from '../types/contracts';
 
 export interface NotifyOptions {
-  title:          string;        // conversation title or page title
+  title:          string;
   sourceApp:      SourceApp;
   onSave:         () => void;
   onSkip:         () => void;
-  autoDismissMs?: number;        // default 8000
+  autoDismissMs?: number;
 }
 
-// One widget at a time — if a new one arrives while one is showing,
-// dismiss the current one first.
 let activeCleanup: (() => void) | null = null;
-
-// ─── Source app display ───────────────────────────────────────────────────────
 
 function getAppLabel(app: SourceApp): string {
   const map: Record<SourceApp, string> = {
-    chatgpt:    'ChatGPT',
-    claude:     'Claude',
-    gemini:     'Gemini',
-    perplexity: 'Perplexity',
-    web:        'Web Page',
+    chatgpt: 'ChatGPT', claude: 'Claude', gemini: 'Gemini',
+    perplexity: 'Perplexity', web: 'Web Page',
   };
   return map[app] ?? 'AI';
 }
 
 function getAppColor(app: SourceApp): string {
   const map: Record<SourceApp, string> = {
-    chatgpt:    '#10a37f',
-    claude:     '#d97706',
-    gemini:     '#4285f4',
-    perplexity: '#7c3aed',
-    web:        '#6b7280',
+    chatgpt: '#10a37f', claude: '#d97706', gemini: '#4285f4',
+    perplexity: '#7c3aed', web: '#22c55e',
   };
-  return map[app] ?? '#6b7280';
+  return map[app] ?? '#22c55e';
 }
-
-// ─── Widget styles ────────────────────────────────────────────────────────────
 
 const WIDGET_CSS = `
   *,*::before,*::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -57,16 +47,16 @@ const WIDGET_CSS = `
     top: 16px;
     right: 16px;
     z-index: 2147483647;
-    width: 288px;
-    background: #0d0d14;
-    border: 1px solid rgba(59,130,246,0.35);
-    border-radius: 14px;
+    width: 300px;
+    background: #000;
+    border: 1px solid #222;
+    border-radius: 12px;
     padding: 14px 14px 10px;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    box-shadow: 0 8px 40px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.04);
+    box-shadow: 0 8px 40px rgba(0,0,0,0.8), 0 0 0 1px rgba(255,255,255,0.04);
     transform: translateX(0);
     opacity: 1;
-    transition: transform 0.35s cubic-bezier(.22,.68,0,1.2), opacity 0.35s ease;
+    transition: transform 0.3s cubic-bezier(.22,.68,0,1.2), opacity 0.3s ease;
   }
 
   .shail-card.entering {
@@ -82,21 +72,21 @@ const WIDGET_CSS = `
   .shail-header {
     display: flex;
     align-items: center;
-    gap: 7px;
-    margin-bottom: 9px;
+    gap: 6px;
+    margin-bottom: 8px;
   }
 
   .shail-dot {
-    width: 8px;
-    height: 8px;
+    width: 7px;
+    height: 7px;
     border-radius: 50%;
     flex-shrink: 0;
   }
 
   .shail-app-label {
-    font-size: 11px;
+    font-size: 10px;
     font-weight: 700;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.06em;
     text-transform: uppercase;
   }
 
@@ -104,35 +94,36 @@ const WIDGET_CSS = `
     margin-left: auto;
     font-size: 9px;
     font-weight: 600;
-    letter-spacing: 0.08em;
-    color: rgba(255,255,255,0.2);
+    letter-spacing: 0.1em;
+    color: #22c55e;
     text-transform: uppercase;
+    font-family: ui-monospace, 'SF Mono', Menlo, monospace;
   }
 
   .shail-close {
     background: none;
     border: none;
     cursor: pointer;
-    color: rgba(255,255,255,0.25);
+    color: #444;
     font-size: 16px;
     line-height: 1;
-    padding: 0 0 0 6px;
+    padding: 0 0 0 8px;
     transition: color 0.15s;
   }
-  .shail-close:hover { color: rgba(255,255,255,0.6); }
+  .shail-close:hover { color: #888; }
 
   .shail-question {
     font-size: 11px;
-    font-weight: 600;
-    color: rgba(255,255,255,0.55);
-    margin-bottom: 5px;
+    font-weight: 500;
+    color: #666;
+    margin-bottom: 4px;
   }
 
   .shail-preview {
     font-size: 12px;
-    color: rgba(255,255,255,0.85);
+    color: #e5e5e5;
     font-weight: 500;
-    line-height: 1.45;
+    line-height: 1.4;
     margin-bottom: 12px;
     white-space: nowrap;
     overflow: hidden;
@@ -141,67 +132,70 @@ const WIDGET_CSS = `
 
   .shail-actions {
     display: flex;
-    gap: 7px;
+    gap: 6px;
     margin-bottom: 10px;
   }
 
   .shail-btn {
-    flex: 1;
-    padding: 7px 0;
-    border-radius: 8px;
-    font-size: 12px;
+    padding: 7px 10px;
+    border-radius: 7px;
+    font-size: 11px;
     font-weight: 600;
     cursor: pointer;
     border: 1px solid transparent;
-    transition: opacity 0.15s, transform 0.1s;
+    transition: opacity 0.15s;
+    white-space: nowrap;
   }
-  .shail-btn:active { transform: scale(0.97); }
+  .shail-btn:active { opacity: 0.75; }
 
   .shail-btn-save {
-    background: linear-gradient(135deg, #3b82f6, #2563eb);
-    color: #fff;
-    border-color: rgba(59,130,246,0.4);
+    flex: 1;
+    background: #fff;
+    color: #000;
+    border-color: #fff;
   }
   .shail-btn-save:hover { opacity: 0.88; }
 
-  .shail-btn-skip {
-    background: rgba(255,255,255,0.05);
-    color: rgba(255,255,255,0.45);
-    border-color: rgba(255,255,255,0.09);
+  .shail-btn-session {
+    background: rgba(34,197,94,0.1);
+    color: #22c55e;
+    border-color: rgba(34,197,94,0.3);
+    font-size: 10px;
   }
-  .shail-btn-skip:hover { color: rgba(255,255,255,0.7); }
+  .shail-btn-session:hover { background: rgba(34,197,94,0.18); }
+
+  .shail-btn-skip {
+    background: transparent;
+    color: #555;
+    border-color: #222;
+    font-size: 10px;
+  }
+  .shail-btn-skip:hover { color: #888; }
 
   .shail-progress-track {
     height: 2px;
-    background: rgba(255,255,255,0.07);
+    background: #1a1a1a;
     border-radius: 2px;
     overflow: hidden;
   }
 
   .shail-progress-fill {
     height: 100%;
-    background: rgba(59,130,246,0.5);
+    background: #22c55e;
     border-radius: 2px;
     transform-origin: left;
     transition: width linear;
   }
 `;
 
-// ─── Widget factory ───────────────────────────────────────────────────────────
-
 export function showCapturePrompt(opts: NotifyOptions): void {
-  // Dismiss any currently-showing widget first
-  if (activeCleanup) {
-    activeCleanup();
-    activeCleanup = null;
-  }
+  if (activeCleanup) { activeCleanup(); activeCleanup = null; }
 
   const dismissMs = opts.autoDismissMs ?? 8000;
   const appColor  = getAppColor(opts.sourceApp);
   const appLabel  = getAppLabel(opts.sourceApp);
-  const preview   = opts.title.trim().slice(0, 64) || 'AI response';
+  const preview   = opts.title.trim().slice(0, 68) || 'Memory worth saving?';
 
-  // ── DOM structure ──────────────────────────────────────────────────────────
   const host = document.createElement('div');
   host.setAttribute('data-shail-notify', '');
   document.body.appendChild(host);
@@ -225,6 +219,7 @@ export function showCapturePrompt(opts: NotifyOptions): void {
     <div class="shail-preview" title="${preview}">${preview}</div>
     <div class="shail-actions">
       <button class="shail-btn shail-btn-save">💾 Save</button>
+      <button class="shail-btn shail-btn-session" title="Coming soon — capture the whole active session">Capture session ▶</button>
       <button class="shail-btn shail-btn-skip">Skip</button>
     </div>
     <div class="shail-progress-track">
@@ -233,48 +228,41 @@ export function showCapturePrompt(opts: NotifyOptions): void {
   `;
   shadow.appendChild(card);
 
-  // ── Animation: slide in ────────────────────────────────────────────────────
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      card.classList.remove('entering');
-    });
-  });
+  requestAnimationFrame(() => requestAnimationFrame(() => { card.classList.remove('entering'); }));
 
-  // ── Progress bar ───────────────────────────────────────────────────────────
   const fill = card.querySelector<HTMLElement>('.shail-progress-fill')!;
   fill.style.transition = `width ${dismissMs}ms linear`;
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      fill.style.width = '0%';
-    });
-  });
+  requestAnimationFrame(() => requestAnimationFrame(() => { fill.style.width = '0%'; }));
 
-  // ── Cleanup ────────────────────────────────────────────────────────────────
   let dismissed = false;
 
   function dismiss(action: 'save' | 'skip' | 'timeout') {
     if (dismissed) return;
     dismissed = true;
     activeCleanup = null;
-
     clearTimeout(timer);
-
     card.classList.add('leaving');
-    setTimeout(() => host.remove(), 400);
-
+    setTimeout(() => host.remove(), 350);
     if (action === 'save') opts.onSave();
     else if (action === 'skip') opts.onSkip();
-    // timeout → no callback, just dismiss
   }
 
-  // ── Auto-dismiss timer ─────────────────────────────────────────────────────
   const timer = setTimeout(() => dismiss('timeout'), dismissMs);
 
-  // ── Button handlers ────────────────────────────────────────────────────────
   card.querySelector('.shail-btn-save')!.addEventListener('click', () => dismiss('save'));
   card.querySelector('.shail-btn-skip')!.addEventListener('click', () => dismiss('skip'));
-  card.querySelector('.shail-close')!.addEventListener('click',   () => dismiss('skip'));
+  card.querySelector('.shail-close')!.addEventListener('click', () => dismiss('skip'));
 
-  // ── Register for external dismissal ───────────────────────────────────────
+  // Capture session — stub for now (show future feature note)
+  card.querySelector('.shail-btn-session')!.addEventListener('click', () => {
+    const btn = card.querySelector<HTMLElement>('.shail-btn-session')!;
+    btn.textContent = 'Coming soon ✦';
+    btn.style.opacity = '0.6';
+    btn.style.cursor = 'default';
+    // Save the current memory as well
+    opts.onSave();
+    setTimeout(() => dismiss('skip'), 1200);
+  });
+
   activeCleanup = () => dismiss('skip');
 }

@@ -1,4 +1,4 @@
-import type { SourceApp } from '../types/contracts';
+import type { SitePolicy, SourceApp } from '../types/contracts';
 
 // ─── Relative timestamps ──────────────────────────────────────────────────────
 
@@ -33,4 +33,21 @@ export function getSourceMeta(app: SourceApp) {
 
 export function sourceInitial(app: SourceApp): string {
   return getSourceMeta(app).label[0].toUpperCase();
+}
+
+// ─── Site policy check ────────────────────────────────────────────────────────
+
+export function isDomainDenied(url: string, policies: SitePolicy[]): boolean {
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname;
+  } catch {
+    return false;
+  }
+  for (const p of policies) {
+    if (p.policy === 'DENY' && (hostname === p.domain || hostname.endsWith(`.${p.domain}`))) {
+      return true;
+    }
+  }
+  return false;
 }

@@ -1,6 +1,9 @@
 import Foundation
 
 enum MockDataProvider {
+#if DEBUG
+    // Demo graph state — only available in debug/development builds.
+    // Never ships to production. Use for SwiftUI previews and local testing.
     static let demoGraphState: GraphState = GraphState(from: [
         "task_description": "Demo: Analyze codebase and generate report",
         "current_step": 2,
@@ -24,55 +27,61 @@ enum MockDataProvider {
         "step_count": 3,
         "current_step_index": 2
     ])
+#endif
 
     static let offlineReply = """
 ⚠️ SHAIL is offline — no backend detected.
 
 I can't process your request right now. Here's how to get back online:
 
-1. Click ⚡ in the menubar → "Start Services"
-2. Make sure your repo path is configured (menubar → "Configure Repo Path…")
-3. Get a free Gemini API key at aistudio.google.com and add it to your .env file
+1. Run: bash ~/jarvis_master/start_shail.sh
+2. Make sure Ollama is running: ollama serve
+3. Make sure Gemma 4 is pulled: ollama pull gemma4:e4b
 
-The Bird's Eye view on the right shows a demo of how SHAIL looks when live. \
-Once connected, it displays your real agent workflow in real time.
+The Bird's Eye view on the right shows a demo of how SHAIL looks when live.
 """
 
     static func errorReply(for error: Error) -> String {
         let msg = error.localizedDescription
         if msg.contains("504") || msg.contains("timeout") || msg.contains("timed out") {
             return """
-⚠️ SHAIL hit a timeout — the LLM took too long to respond.
+⚠️ SHAIL timed out — Gemma 4 took too long to respond.
 
-This usually means your Gemini API key has quota limits or the model is \
-under heavy load. Here's what to try:
+Gemma 4 (gemma4:e4b) is a large model — first response may take 30–60 seconds.
 
-1. Get a fresh API key at aistudio.google.com (free tier works)
-2. Add it to your .env file: GEMINI_API_KEY=your_new_key
-3. Restart services: menubar ⚡ → "Stop Services" then "Start Services"
-
-The Bird's Eye view on the right shows the demo workflow while you fix it.
+1. Wait a moment and try again
+2. Check Ollama: ollama ps (should show gemma4:e4b running)
+3. Restart: menubar ⚡ → "Stop Services" then "Start Services"
 """
         }
-        if msg.contains("API_KEY") || msg.contains("API key") || msg.contains("401") || msg.contains("400") {
+        if msg.contains("404") || msg.contains("Not Found") {
             return """
-⚠️ Invalid or missing Gemini API key.
+⚠️ SHAIL backend not running or outdated.
 
-The backend is running but the AI model rejected the key. Fix it in 3 steps:
+The API server needs to be started:
 
-1. Get a valid key at aistudio.google.com (it's free)
-2. Open your .env file and set: GEMINI_API_KEY=your_key_here
-3. Restart services: menubar ⚡ → "Stop Services" then "Start Services"
+1. Run: bash ~/jarvis_master/start_shail.sh
+2. Or start manually: cd ~/jarvis_master/apps/shail && uvicorn main:app --port 8000
+3. Check Ollama: ollama serve (in a separate terminal)
+"""
+        }
+        if msg.contains("connection refused") || msg.contains("Could not connect") {
+            return """
+⚠️ Cannot reach SHAIL backend (connection refused).
 
-The Bird's Eye view on the right shows the demo workflow while you fix it.
+Start the backend:
+
+1. Run: bash ~/jarvis_master/start_shail.sh
+2. Verify: curl http://localhost:8000/health
 """
         }
         return """
 ⚠️ Something went wrong with SHAIL (\(msg)).
 
-The Bird's Eye view on the right shows the demo workflow. \
-To get back online, check the menubar ⚡ → "Start Services" \
-and make sure your Gemini API key is set in .env.
+To get back online:
+1. Run: bash ~/jarvis_master/start_shail.sh
+2. Check Ollama is running: ollama serve
+3. Verify API: curl http://localhost:8000/health
 """
     }
 }

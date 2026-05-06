@@ -1,5 +1,26 @@
 import { sha256 } from './crypto';
-import type { CaptureCandidate, SourceApp } from '../types/contracts';
+import { isDomainDenied } from './utils';
+import type { CaptureCandidate, SitePolicy, SourceApp } from '../types/contracts';
+
+// ─── Policy cache (30s TTL) ───────────────────────────────────────────────────
+
+let _policyCache: SitePolicy[] | null = null;
+let _policyCacheAt = 0;
+const POLICY_TTL_MS = 30_000;
+
+export async function isCaptureAllowed(url: string): Promise<boolean> {
+  const now = Date.now();
+  if (_policyCache === null || now - _policyCacheAt > POLICY_TTL_MS) {
+    try {
+      const stored = await browser.storage.local.get('shail_policies');
+      _policyCache = (stored['shail_policies'] as SitePolicy[]) ?? [];
+    } catch {
+      _policyCache = [];
+    }
+    _policyCacheAt = now;
+  }
+  return !isDomainDenied(url, _policyCache);
+}
 
 /**
  * Builds a stable SHA-256 customId for deduplication.

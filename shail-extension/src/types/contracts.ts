@@ -3,7 +3,14 @@
 export type EventType =
   | 'ai_conversation'
   | 'page_visit'
-  | 'manual';
+  | 'manual'
+  | 'audio_clip'
+  | 'video_clip'
+  | 'pdf_doc'
+  | 'mindmap'
+  | 'diagram'
+  | 'html_page'
+  | 'document';
 
 export type SourceApp =
   | 'chatgpt'
@@ -54,6 +61,7 @@ export interface SearchRequest {
   query: string;
   filters?: SearchFilters;
   scope?: 'all' | 'current_site';
+  after?: string;  // ISO 8601 — only return memories with timestamp >= after
 }
 
 export interface ContextBundle {
@@ -135,7 +143,9 @@ export type BackgroundMessage =
   | { type: 'CAPTURE'; payload: CaptureCandidate }
   | { type: 'SEARCH'; payload: SearchRequest }
   | { type: 'OPEN_SIDEPANEL' }
-  | { type: 'GET_POLICIES' };
+  | { type: 'GET_POLICIES' }
+  | { type: 'FETCH_ASCENT'; payload: { id: string } }
+  | { type: 'TOGGLE_TODO'; payload: { ascentId: string; todoId: string; completed: boolean } };
 
 export type BackgroundResponse =
   | { ok: true; data: unknown }

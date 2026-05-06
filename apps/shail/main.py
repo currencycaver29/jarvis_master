@@ -1,9 +1,12 @@
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, AsyncIterator
+import asyncio
+import httpx
+import json
 import os
 import sys
 import importlib.util
@@ -47,9 +50,14 @@ from shail.integrations.mcp.provider import get_provider
 from apps.shail.websocket_server import websocket_endpoint, websocket_manager
 from apps.shail.native_health import register_native_health
 from apps.shail.browser_api import browser_router
-from apps.shail.auth_api import auth_router
+from apps.shail.ascents_api import ascents_router
+from apps.shail.chat_api import chat_router
+from apps.shail.auth_api import auth_router, get_user_or_local
 from apps.shail.auth_store import init_auth_db
 from apps.shail.memory_dashboard_api import dashboard_router
+from apps.shail.macos_memory_api import memory_router, path_idx_router
+from apps.shail.llm import call_llm
+from shail.core.task_classifier import classify
 import uuid
 
 
@@ -63,6 +71,13 @@ def ensure_log_dir():
 class HealthResponse(BaseModel):
     status: str = Field(default="ok")
     service: str = Field(default="shail")
+    version: str = Field(default="0.1.0")
+    chroma_ready: bool = Field(default=False)
+    embedder_ready: bool = Field(default=False)
+    ollama_reachable: bool = Field(default=False)
+    google_oauth_configured: bool = Field(default=False)
+    apple_signin_configured: bool = Field(default=False)
+    errors: List[str] = Field(default_factory=list)
 
 
 class ApprovalResponse(BaseModel):
@@ -79,9 +94,23 @@ class TaskQueuedResponse(BaseModel):
 
 app = FastAPI(title="Shail Service", version="0.1.0")
 
+# CORS: pinned to known origins. allow_origins=["*"] paired with
+# allow_credentials=True is a CORS spec violation that some browsers reject.
+# Extension origins use chrome-extension:// scheme; allow_origin_regex covers
+# every install ID without enumerating them.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:8000",
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:8000",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+    ],
+    # Chrome extension IDs are 32 lowercase a-p chars (base-26); also allow
+    # any alphanumeric variant to future-proof Safari/Firefox extensions.
+    allow_origin_regex=r"^chrome-extension://[a-z0-9]+$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -89,13 +118,36 @@ app.add_middleware(
 
 register_native_health(app)
 app.include_router(auth_router, prefix="/auth", tags=["auth"])
-app.include_router(browser_router, prefix="/browser", tags=["browser"])
-app.include_router(dashboard_router, prefix="/api/v2", tags=["dashboard"])
 
-# ── Serve shail-ui SPA at /dashboard ──────────────────────────────────────────
+# Google OAuth2 — mount BEFORE the generic /auth router to avoid prefix conflicts
+from apps.shail.google_auth_api import google_auth_router  # noqa: E402
+app.include_router(google_auth_router, prefix="/auth/google", tags=["google-auth"])
+
+app.include_router(browser_router, prefix="/browser", tags=["browser"])
+app.include_router(ascents_router, prefix="/browser/ascents", tags=["ascents"])
+app.include_router(chat_router, prefix="/browser/chat", tags=["chat"])
+app.include_router(dashboard_router, prefix="/api/v2", tags=["dashboard"])
+app.include_router(memory_router, prefix="/memory", tags=["memory"])
+app.include_router(path_idx_router, prefix="/path-index", tags=["path-index"])
+
+from apps.shail.system_api import system_router  # noqa: E402
+app.include_router(system_router, prefix="/system", tags=["system"])
+
+# ── Serve shail-ui SPA at /dashboard (web fallback when ShailUI.app not running)
 _UI_DIST = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../apps/shail-ui/dist"))
 if os.path.isdir(_UI_DIST):
-    app.mount("/dashboard", StaticFiles(directory=_UI_DIST, html=True), name="shail-ui")
+    from pathlib import Path as _Path
+    _UI_ASSETS = os.path.join(_UI_DIST, "assets")
+    if os.path.isdir(_UI_ASSETS):
+        app.mount("/dashboard/assets", StaticFiles(directory=_UI_ASSETS), name="shail-ui-assets")
+
+    @app.get("/dashboard", include_in_schema=False)
+    @app.get("/dashboard/{full_path:path}", include_in_schema=False)
+    async def serve_dashboard_spa(full_path: str = ""):
+        candidate = _Path(_UI_DIST) / full_path
+        if full_path and candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(_Path(_UI_DIST) / "index.html")
 
 router = ShailCoreRouter()
 logger = logging.getLogger(__name__)
@@ -104,11 +156,19 @@ logger = logging.getLogger(__name__)
 @app.on_event("startup")
 def bootstrap_mcp():
     """Register all tools with MCP on service startup."""
+    settings = get_settings()
+    os.makedirs(os.path.dirname(settings.sqlite_path), exist_ok=True)
     try:
         init_auth_db()
         logger.info("Auth DB initialized")
     except Exception as exc:
         logger.warning("Auth DB init failed: %s", exc)
+    try:
+        from apps.shail.blueprints import init_blueprint_db
+        init_blueprint_db()
+        logger.info("Blueprint DB initialized")
+    except Exception as exc:
+        logger.warning("Blueprint DB init failed: %s", exc)
     try:
         register_all_tools(get_provider())
         logger.info("MCP registration completed on startup")
@@ -118,7 +178,49 @@ def bootstrap_mcp():
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    return HealthResponse()
+    errors: List[str] = []
+    chroma_ready = False
+    embedder_ready = False
+    ollama_reachable = False
+
+    try:
+        from shail.memory.rag import _get_store
+        store = _get_store()
+        if hasattr(store, "collection"):
+            _ = store.collection.count()
+        chroma_ready = True
+    except Exception as exc:
+        errors.append(f"chroma: {exc}")
+
+    try:
+        from shail.memory.embeddings import embed_query
+        vec = embed_query("ping")
+        embedder_ready = bool(vec)
+    except Exception as exc:
+        errors.append(f"embedder: {exc}")
+
+    try:
+        import httpx
+        host = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+        with httpx.Client(timeout=2.0) as c:
+            r = c.get(f"{host}/api/tags")
+            ollama_reachable = r.status_code == 200
+    except Exception as exc:
+        errors.append(f"ollama: {exc}")
+
+    google_oauth_configured = bool(os.getenv("GOOGLE_CLIENT_ID") and os.getenv("GOOGLE_CLIENT_SECRET"))
+    apple_signin_configured = bool(os.getenv("APPLE_AUDIENCE"))
+
+    overall_ok = chroma_ready and embedder_ready
+    return HealthResponse(
+        status="ok" if overall_ok else "degraded",
+        chroma_ready=chroma_ready,
+        embedder_ready=embedder_ready,
+        ollama_reachable=ollama_reachable,
+        google_oauth_configured=google_oauth_configured,
+        apple_signin_configured=apple_signin_configured,
+        errors=errors,
+    )
 
 
 @app.websocket("/ws/brain")
@@ -481,91 +583,256 @@ async def chat_history(limit: int = 200):
         raise HTTPException(status_code=500, detail=f"History error: {str(e)}")
 
 
-@app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest) -> ChatResponse:
-    """
-    Direct chat endpoint - immediate LLM response without task queue.
-    
-    This endpoint provides synchronous, real-time conversation with the LLM.
-    Perfect for quick questions and interactive chat.
-    
-    Supports:
-    - Text-only messages
-    - Image attachments (multimodal input)
-    
-    Returns response immediately (no async task queue).
+
+async def rag_retrieve(query: str, user_id: str = "local") -> str:
+    """Retrieve context from all memory tiers for a query, scoped to a user.
+
+    Sprint 1 fix: previously queried `shail_important` and `shail_ephemeral`
+    as separate Chroma collections — but every writer (browser_api,
+    macos_memory_api, _ingest_unified) writes to the single base collection
+    via _get_store() with `tier` as a metadata field. The old code therefore
+    queried empty collections and Gemma never saw any captured memory.
     """
     try:
-        settings = get_settings()
-        
-        if not settings.gemini_api_key:
-            raise HTTPException(
-                status_code=500, 
-                detail="GEMINI_API_KEY not configured. Please set it in .env file or environment variables."
-            )
-        
-        # Import LangChain Gemini client
-        try:
-            from langchain_google_genai import ChatGoogleGenerativeAI
-            from langchain_core.messages import HumanMessage
-        except ImportError:
-            raise HTTPException(
-                status_code=500,
-                detail="langchain_google_genai not installed. Install with: pip install langchain-google-genai"
-            )
-        
-        # Initialize LLM client
-        llm = ChatGoogleGenerativeAI(
-            model=settings.gemini_model,
-            google_api_key=settings.gemini_api_key,
-            temperature=0.7
-        )
-        
-        # Build message content
-        content = [{"type": "text", "text": request.text}]
-        
-        # Add images if provided (multimodal support)
-        if request.attachments:
-            for att in request.attachments:
-                if att.mime_type and att.mime_type.startswith("image/"):
-                    if att.content_b64:
-                        content.append({
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:{att.mime_type};base64,{att.content_b64}"
-                            }
-                        })
-        
-        # Create message and invoke LLM with timeout
-        import asyncio
-        message = HumanMessage(content=content)
-        try:
-            response = await asyncio.wait_for(
-                llm.ainvoke([message]),
-                timeout=60.0  # 60 seconds for LLM response
-            )
-        except asyncio.TimeoutError:
-            raise HTTPException(
-                status_code=504,
-                detail="LLM response timeout. Please try again with a simpler query."
-            )
+        from shail.memory.rag import _get_store
+        from shail.memory.path_index import search as path_search
+        from shail.memory.embeddings import embed_query as emb_q
+        s = get_settings()
 
-        # Persist conversation
-        try:
-            append_message("user", request.text)
-            append_message("assistant", response.content)
-        except Exception:
-            logger.warning("Failed to append chat history")
-        
-        return ChatResponse(
-            text=response.content,
-            model=settings.gemini_model
-        )
-        
-    except HTTPException:
-        raise
+        q_embed = emb_q(query)
+        results: list = []
+
+        store = _get_store()
+        namespace = f"user_{user_id}" if user_id and user_id != "local" else "local"
+
+        for tier in ("important", "ephemeral"):
+            try:
+                hits = store.query(
+                    query_embedding=q_embed,
+                    namespace=namespace,
+                    filters={"tier": tier},
+                    k=4,
+                )
+                results.extend(hits)
+            except Exception as exc:
+                logger.warning("rag_retrieve tier=%s failed: %s", tier, exc)
+
+        path_hits = path_search(s.path_index_db, query, limit=3)
+        for h in path_hits:
+            snippet = f"{h.get('title', '')} — {h['path']}"
+            results.append({"content": snippet, "score": 0.6})
+
+        # Sort by score ascending (lower = more similar in cosine distance)
+        results.sort(key=lambda x: x.get("score", 1.0))
+        return "\n\n---\n".join(r["content"][:400] for r in results[:6])
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
+        logger.warning("rag_retrieve failed: %s", e)
+        return ""
+
+
+# ── /query endpoint (replaces /chat) ─────────────────────────────────────────
+
+class QueryRequest(BaseModel):
+    text: str
+    history: List[Dict[str, str]] = Field(default_factory=list)
+
+
+class WebSource(BaseModel):
+    title: str
+    url: str
+    snippet: str = ""
+
+
+class QueryResponse(BaseModel):
+    answer: str
+    text: str = ""       # backward-compat: old ChatService decodes .text
+    tier_used: str
+    model: str = "gemma3:4b-it-q4_K_M"
+    sources: List[WebSource] = Field(default_factory=list)
+    used_web: bool = False
+
+
+@app.post("/query", response_model=QueryResponse)
+async def unified_query(
+    req: QueryRequest,
+    user_id: str = Depends(get_user_or_local),
+) -> QueryResponse:
+    """
+    Unified query: classify intent, run RAG + (optionally) web search in parallel,
+    inject combined context into Gemma. Web search hard-capped at 3 s.
+    """
+    from apps.shail.web_search import needs_web_search, search as web_search, format_for_prompt
+
+    slot = classify(req.text)
+
+    # Run RAG and web search concurrently — overlap latency
+    needs_rag = slot in ("memory.search", "nav.assist", "gemma.chat")
+    needs_web = needs_web_search(req.text)
+
+    rag_task = rag_retrieve(req.text, user_id=user_id) if needs_rag else None
+    web_task = web_search(req.text, max_results=3, timeout=3.0) if needs_web else None
+
+    rag_context = ""
+    web_results: list = []
+
+    if rag_task and web_task:
+        rag_context, web_results = await asyncio.gather(rag_task, web_task)
+    elif rag_task:
+        rag_context = await rag_task
+    elif web_task:
+        web_results = await web_task
+
+    # Build combined context
+    parts = []
+    if rag_context:
+        parts.append(rag_context)
+    if web_results:
+        parts.append(format_for_prompt(web_results))
+    context = "\n\n---\n\n".join(parts)
+
+    messages = req.history + [{"role": "user", "content": req.text}]
+    answer, meta = await call_llm(
+        messages=messages,
+        user_id=user_id,
+        context=context,
+        system_prompt="You are SHAIL, a personal AI assistant running locally.",
+    )
+
+    try:
+        append_message("user", req.text)
+        append_message("assistant", answer)
+    except Exception:
+        pass
+
+    sources = [WebSource(**r) for r in web_results] if web_results else []
+
+    return QueryResponse(
+        answer=answer,
+        text=answer,
+        tier_used=slot,
+        model=meta.get("model", get_settings().ollama_chat_model),
+        sources=sources,
+        used_web=bool(web_results),
+    )
+
+
+@app.post("/chat", response_model=QueryResponse)
+async def chat_compat(
+    req: QueryRequest,
+    user_id: str = Depends(get_user_or_local),
+) -> QueryResponse:
+    """/chat kept for backward-compat — delegates to /query."""
+    return await unified_query(req, user_id=user_id)
+
+
+@app.post("/query/stream")
+async def stream_query(req: QueryRequest) -> StreamingResponse:
+    """
+    Streaming SSE version of /query — token streaming + parallel web search.
+
+    Events:
+      data: {"token": "..."}                              — partial token
+      data: {"sources": [...]}                            — emitted ASAP after web fetch
+      data: {"done": true, "answer": "...", "sources":[]} — final
+      data: {"error": "..."}                              — backend error
+    """
+    from apps.shail.web_search import needs_web_search, search as web_search, format_for_prompt
+
+    s = get_settings()
+    slot = classify(req.text)
+    needs_rag = slot in ("memory.search", "nav.assist", "gemma.chat")
+    needs_web = needs_web_search(req.text)
+
+    # Run RAG + web search concurrently BEFORE streaming starts
+    rag_task = rag_retrieve(req.text) if needs_rag else None
+    web_task = web_search(req.text, max_results=3, timeout=3.0) if needs_web else None
+
+    rag_context = ""
+    web_results: list = []
+    if rag_task and web_task:
+        rag_context, web_results = await asyncio.gather(rag_task, web_task)
+    elif rag_task:
+        rag_context = await rag_task
+    elif web_task:
+        web_results = await web_task
+
+    parts = []
+    if rag_context:
+        parts.append(rag_context)
+    if web_results:
+        parts.append(format_for_prompt(web_results))
+    context = "\n\n---\n\n".join(parts)
+
+    system_content = "You are SHAIL, a personal AI assistant running locally."
+    if context:
+        system_content += f"\n\nRelevant context:\n{context}"
+
+    messages = req.history + [{"role": "user", "content": req.text}]
+    payload = {
+        "model": s.ollama_chat_model,
+        "messages": [{"role": "system", "content": system_content}] + messages,
+        "stream": True,
+    }
+
+    async def event_stream() -> AsyncIterator[str]:
+        full_answer = ""
+        # Emit sources upfront so UI can render link icons early
+        if web_results:
+            yield f"data: {json.dumps({'sources': web_results})}\n\n"
+        try:
+            async with httpx.AsyncClient(timeout=90.0) as client:
+                async with client.stream(
+                    "POST", f"{s.ollama_base_url}/api/chat", json=payload
+                ) as resp:
+                    async for line in resp.aiter_lines():
+                        if not line:
+                            continue
+                        try:
+                            chunk = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        token = chunk.get("message", {}).get("content", "")
+                        if token:
+                            full_answer += token
+                            yield f"data: {json.dumps({'token': token})}\n\n"
+                        if chunk.get("done"):
+                            yield f"data: {json.dumps({'done': True, 'answer': full_answer, 'sources': web_results})}\n\n"
+                            break
+        except httpx.ConnectError:
+            yield f"data: {json.dumps({'error': 'ollama_offline', 'message': 'Ollama is not running'})}\n\n"
+        except Exception as exc:
+            logger.error("stream_query error: %s", exc)
+            yield f"data: {json.dumps({'error': 'backend_error', 'message': str(exc)})}\n\n"
+
+        try:
+            append_message("user", req.text)
+            append_message("assistant", full_answer)
+        except Exception:
+            pass
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ── Startup indexing ──────────────────────────────────────────────────────────
+
+@app.on_event("startup")
+async def _startup_index():
+    async def _run():
+        await asyncio.sleep(6)
+        try:
+            from shail.memory.path_index import scan
+            count = scan(get_settings().path_index_db)
+            logger.info("Startup path index complete: %d files", count)
+        except Exception as e:
+            logger.warning("Startup index failed: %s", e)
+    asyncio.create_task(_run())
 
 
 if __name__ == "__main__":

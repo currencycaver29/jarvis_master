@@ -3,7 +3,7 @@ from shail.core.types import Artifact
 from shail.agents.base import AbstractAgent
 from shail.tools.os import open_app, close_app, run_command
 from shail.tools.files import write_text_file, read_text_file, list_files, delete_file, create_directory
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_ollama import ChatOllama
 from langchain.agents import create_react_agent, AgentExecutor
 from apps.shail.settings import get_settings
 
@@ -14,10 +14,9 @@ class CodeAgent(AbstractAgent):
 
     def __init__(self):
         settings = get_settings()
-        self.llm = ChatGoogleGenerativeAI(
-            model=settings.gemini_model,
-            google_api_key=settings.gemini_api_key or None,
-            temperature=0.7
+        self.llm = ChatOllama(
+            model=settings.ollama_chat_model,
+            temperature=0.7,
         )
         self.tools = [
             open_app,

@@ -29,5 +29,22 @@
 	<false/>
 
 	<!-- SwiftUI apps usually don’t need NSMainNibFile -->
+
+	<!-- Custom URL scheme: shail://dashboard opens the Bird’s Eye dashboard -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>shail</string>
+			</array>
+			<key>CFBundleURLName</key>
+			<string>SHAIL</string>
+		</dict>
+	</array>
+
+	<!-- Privacy strings (required on Ventura+ for permission dialogs) -->
+	<key>NSAccessibilityUsageDescription</key>
+	<string>SHAIL uses Accessibility to read active window content for memory capture.</string>
 </dict>
 </plist>

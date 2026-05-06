@@ -257,6 +257,28 @@ const CSS = `
 }
 .open-btn:hover{color:#9ca3af}
 
+/* Chat answer card */
+.chat-answer{
+  background:rgba(59,130,246,.07);border:1px solid rgba(59,130,246,.25);
+  border-radius:10px;margin-bottom:6px;padding:12px;
+}
+.chat-answer-label{
+  font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;
+  color:rgba(59,130,246,.7);margin-bottom:6px;
+  display:flex;align-items:center;gap:6px;
+}
+.chat-answer-label::after{content:'';flex:1;height:1px;background:rgba(59,130,246,.15)}
+.chat-answer-text{
+  font-size:12px;color:#d1d5db;line-height:1.65;white-space:pre-wrap;word-break:break-word;
+  max-height:240px;overflow-y:auto;
+}
+.chat-answer-text::-webkit-scrollbar{width:3px}
+.chat-answer-text::-webkit-scrollbar-thumb{background:#2d2d3e;border-radius:2px}
+.chat-tier{
+  margin-top:6px;font-size:9px;color:#4b5563;
+  display:flex;align-items:center;gap:4px;
+}
+
 /* Toast (inside the panel) */
 .toast{
   position:absolute;bottom:52px;left:50%;transform:translateX(-50%);
@@ -550,6 +572,47 @@ function buildOverlay(getLastFocused: () => Element | null) {
     }
   }
 
+  // ── SHAIL /query chat mode ────────────────────────────────────────────────
+  function renderChatAnswer(answer: string, tierUsed: string) {
+    resultsEl.innerHTML = `
+      <div class="chat-answer">
+        <div class="chat-answer-label">SHAIL Answer</div>
+        <div class="chat-answer-text">${esc(answer)}</div>
+        <div class="chat-tier">⚙ ${esc(tierUsed)}</div>
+      </div>
+    `;
+  }
+
+  function looksLikeQuestion(text: string): boolean {
+    const t = text.trim().toLowerCase();
+    if (t.endsWith('?')) return true;
+    const QUESTION_VERBS = [
+      'what ', 'why ', 'how ', 'when ', 'where ', 'who ', 'which ',
+      'explain ', 'tell me', 'summarize ', 'list ', 'give me', 'show me',
+      'can you', 'could you', 'would you', 'help me',
+    ];
+    return QUESTION_VERBS.some(v => t.startsWith(v));
+  }
+
+  async function doQuery(text: string) {
+    renderSkeletons();
+    try {
+      const resp = await fetch('http://localhost:8000/query', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, history: [] }),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json() as { answer: string; tier_used: string };
+      renderChatAnswer(data.answer, data.tier_used);
+    } catch (err) {
+      renderChatAnswer(
+        'SHAIL is not reachable — make sure the local server is running.',
+        'error',
+      );
+    }
+  }
+
   // ── Search ─────────────────────────────────────────────────────────────────
   async function doSearch(query: string) {
     renderSkeletons();
@@ -608,6 +671,21 @@ function buildOverlay(getLastFocused: () => Element | null) {
     currentQuery = searchInput.value.trim();
     if (searchTimer) clearTimeout(searchTimer);
     searchTimer = setTimeout(() => doSearch(currentQuery), 300);
+  });
+
+  // Enter → ask SHAIL directly if it looks like a question; otherwise search
+  searchInput.addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    const text = searchInput.value.trim();
+    if (!text) return;
+    currentQuery = text;
+    if (searchTimer) clearTimeout(searchTimer);
+    if (looksLikeQuestion(text)) {
+      void doQuery(text);
+    } else {
+      void doSearch(text);
+    }
   });
 
   // Prevent panel clicks from reaching the backdrop

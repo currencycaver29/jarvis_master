@@ -40,6 +40,12 @@ function Options() {
   const [authError,      setAuthError]      = useState('');
   const [addingBrowser,  setAddingBrowser]  = useState(false);
   const [addBrowserMsg,  setAddBrowserMsg]  = useState('');
+  const [googleLoading,  setGoogleLoading]  = useState(false);
+  const [googleError,    setGoogleError]    = useState('');
+  const googlePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [mergeCount,     setMergeCount]     = useState(0);
+  const [mergeLoading,   setMergeLoading]   = useState(false);
+  const [mergeChecking,  setMergeChecking]  = useState(false);
 
   // ── Site policies ──────────────────────────────────────────────────────────
   const [policies,     setPolicies]     = useState<SitePolicy[]>([]);
@@ -56,17 +62,28 @@ function Options() {
     });
 
     // Check sign-in state
-    Promise.all([getApiKey(), getUserId()]).then(async ([key, uid]) => {
-      if (key && uid) {
-        // Verify key is still valid
+    getApiKey().then(async (key) => {
+      if (key) {
         try {
           const me = await api.authMe();
           setUserEmail(me.email);
           setUserName(me.name || me.email);
           setSignedIn(true);
-        } catch {
-          // Key invalid → clear it
-          await clearAuthCredentials();
+          // Sync blocked domains from backend (server is source of truth)
+          try {
+            const settings = await api.captureSettings();
+            const localResult = await browser.storage.local.get(KEY_POLICIES);
+            const local = (localResult[KEY_POLICIES] as SitePolicy[]) ?? [];
+            const serverDomains: SitePolicy[] = settings.blocked_domains.map(d => ({ domain: d, policy: 'DENY' as const }));
+            const merged = [...serverDomains, ...local.filter(p => !serverDomains.some(s => s.domain === p.domain))];
+            setPolicies(merged);
+            await browser.storage.local.set({ [KEY_POLICIES]: merged });
+          } catch { /* backend offline — use local only */ }
+        } catch (err) {
+          // Only clear on explicit 401 — network errors shouldn't log the user out
+          if ((err as Error).message === 'NOT_SIGNED_IN') {
+            await clearAuthCredentials();
+          }
           setSignedIn(false);
         }
       } else {
@@ -98,12 +115,14 @@ function Options() {
       await setAuthCredentials(result.api_key, result.user_id);
       // Clear local cache so sidepanel re-fetches from user's namespace
       await browser.storage.local.remove('shail_doc_index');
+      await browser.storage.local.set({ shail_auth_changed: true });
       setUserEmail(result.email);
       setUserName(result.name || result.email);
       setSignedIn(true);
       setAuthEmail('');
       setAuthPassword('');
       setAuthName('');
+      checkMergePrompt(result.user_id);
     } catch (err) {
       setAuthError((err as Error).message ?? 'Authentication failed');
     } finally {
@@ -113,9 +132,101 @@ function Options() {
 
   async function handleSignOut() {
     await clearAuthCredentials();
+    await browser.storage.local.set({ shail_signed_out: true });
     setSignedIn(false);
     setUserEmail('');
     setUserName('');
+  }
+
+  async function handleGoogleSignIn() {
+    setGoogleLoading(true);
+    setGoogleError('');
+    const state = crypto.randomUUID();
+    const startUrl = api.googleStartUrl(state);
+    chrome.tabs.create({ url: startUrl });
+
+    let attempts = 0;
+    const MAX_ATTEMPTS = 30; // 60s at 2s interval
+
+    googlePollRef.current = setInterval(async () => {
+      attempts++;
+      try {
+        const result = await api.pollGoogleToken(state);
+        if (result) {
+          clearInterval(googlePollRef.current!);
+          googlePollRef.current = null;
+          await setAuthCredentials(result.api_key, result.user_id);
+          await browser.storage.local.remove('shail_doc_index');
+          await browser.storage.local.set({ shail_auth_changed: true });
+          setUserEmail(result.email);
+          setUserName(result.name || result.email);
+          setSignedIn(true);
+          setGoogleLoading(false);
+          checkMergePrompt(result.user_id);
+          chrome.tabs.create({ url: `http://localhost:8000/dashboard?token=${result.api_key}` });
+        } else if (attempts >= MAX_ATTEMPTS) {
+          clearInterval(googlePollRef.current!);
+          googlePollRef.current = null;
+          setGoogleLoading(false);
+          setGoogleError('Sign-in timed out — please try again');
+        }
+      } catch (err) {
+        clearInterval(googlePollRef.current!);
+        googlePollRef.current = null;
+        setGoogleLoading(false);
+        setGoogleError((err as Error).message ?? 'Sign-in failed');
+      }
+    }, 2000);
+  }
+
+  async function checkMergePrompt(userId: string) {
+    try {
+      const res = await fetch('http://localhost:8000/browser/anonymous-count', { signal: AbortSignal.timeout(3000) });
+      if (!res.ok) return;
+      const { count } = await res.json();
+      if (count > 0) {
+        const flagKey = `shail_merge_prompted_${userId}`;
+        const stored = await browser.storage.local.get(flagKey);
+        if (!stored[flagKey]) {
+          setMergeCount(count);
+        }
+      }
+    } catch { /* backend offline or anonymous-count not yet available */ }
+  }
+
+  async function handleMergeImport(userId: string) {
+    setMergeLoading(true);
+    try {
+      const key = await getApiKey();
+      await fetch('http://localhost:8000/browser/claim-anonymous', {
+        method: 'POST',
+        headers: key ? { Authorization: `Bearer ${key}` } : {},
+        signal: AbortSignal.timeout(8000),
+      });
+    } catch { /* ignore */ } finally {
+      const flagKey = `shail_merge_prompted_${userId}`;
+      await browser.storage.local.set({ [flagKey]: true });
+      setMergeCount(0);
+      setMergeLoading(false);
+    }
+  }
+
+  async function handleMergeSkip(userId: string) {
+    const flagKey = `shail_merge_prompted_${userId}`;
+    await browser.storage.local.set({ [flagKey]: true });
+    setMergeCount(0);
+  }
+
+  async function handleCheckPreLoginMemories() {
+    setMergeChecking(true);
+    try {
+      const res = await fetch('http://localhost:8000/browser/anonymous-count', { signal: AbortSignal.timeout(4000) });
+      if (!res.ok) { setMergeChecking(false); return; }
+      const { count } = await res.json();
+      setMergeCount(count);
+    } catch { /* backend offline */ } finally {
+      setMergeChecking(false);
+    }
   }
 
   async function handleAddBrowser() {
@@ -194,6 +305,11 @@ function Options() {
     return '';
   }
 
+  function syncPoliciesToBackend(policies: SitePolicy[]) {
+    const blocked = policies.filter(p => p.policy === 'DENY').map(p => p.domain);
+    api.putCaptureSettings({ blocked_domains: blocked }).catch(() => {});
+  }
+
   async function addPolicy(domain: string) {
     const err = validateDomain(domain);
     if (err) { setDomainError(err); return; }
@@ -203,6 +319,7 @@ function Options() {
     setDomainInput('');
     setDomainError('');
     await browser.storage.local.set({ [KEY_POLICIES]: next });
+    syncPoliciesToBackend(next);
     domainRef.current?.focus();
   }
 
@@ -210,6 +327,7 @@ function Options() {
     const next = policies.filter(p => p.domain !== domain);
     setPolicies(next);
     await browser.storage.local.set({ [KEY_POLICIES]: next });
+    syncPoliciesToBackend(next);
   }
 
   async function blockCurrentSite() {
@@ -283,6 +401,37 @@ function Options() {
               Sign in to sync your memories across all your browsers automatically.
             </div>
 
+            {/* Google Sign-In */}
+            <button
+              type="button"
+              onClick={handleGoogleSignIn}
+              disabled={googleLoading}
+              className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-opacity hover:opacity-90 disabled:opacity-40"
+              style={{ background: '#1e1e2e', border: '1px solid #2d2d3e', color: '#e5e7eb' }}
+            >
+              {googleLoading ? (
+                <Loader2 size={12} className="animate-spin" />
+              ) : (
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
+                  <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+                  <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+                  <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" fill="#FBBC05"/>
+                  <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+                </svg>
+              )}
+              {googleLoading ? 'Waiting for Google…' : 'Continue with Google'}
+            </button>
+            {googleError && (
+              <div className="flex items-center gap-1.5 text-[11px]" style={{ color: '#f87171' }}>
+                <AlertCircle size={11} /> {googleError}
+              </div>
+            )}
+            <div className="flex items-center gap-2">
+              <div className="flex-1 h-px" style={{ background: '#1e1e2e' }} />
+              <span className="text-[10px]" style={{ color: '#4b5563' }}>or</span>
+              <div className="flex-1 h-px" style={{ background: '#1e1e2e' }} />
+            </div>
+
             {authMode === 'register' && (
               <input
                 type="text"
@@ -354,12 +503,54 @@ function Options() {
               Memories sync across all your browsers automatically.
             </div>
 
+            {mergeCount > 0 && (
+              <div className="rounded-lg px-3 py-2.5" style={{ background: 'rgba(59,130,246,0.08)', border: '1px solid rgba(59,130,246,0.2)' }}>
+                <div className="text-[11px] text-blue-300 mb-2">
+                  {mergeCount} {mergeCount === 1 ? 'memory was' : 'memories were'} captured before sign-in. Import {mergeCount === 1 ? 'it' : 'them'} to your account?
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={async () => { const uid = await getUserId(); handleMergeImport(uid ?? ''); }}
+                    disabled={mergeLoading}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-medium transition-opacity hover:opacity-90 disabled:opacity-40"
+                    style={{ background: 'rgba(59,130,246,0.18)', border: '1px solid rgba(59,130,246,0.35)', color: '#60a5fa' }}
+                  >
+                    {mergeLoading ? <Loader2 size={10} className="animate-spin" /> : null}
+                    Import
+                  </button>
+                  <button
+                    onClick={async () => { const uid = await getUserId(); handleMergeSkip(uid ?? ''); }}
+                    disabled={mergeLoading}
+                    className="px-2.5 py-1 rounded text-[11px] transition-opacity hover:opacity-80 disabled:opacity-40"
+                    style={{ background: '#1e1e2e', color: '#6b7280', border: '1px solid #2d2d3e' }}
+                  >
+                    Skip
+                  </button>
+                </div>
+              </div>
+            )}
+
             {addBrowserMsg && (
               <div
                 className="text-[11px] px-2 py-1 rounded"
                 style={{ color: addBrowserMsg.startsWith('✓') ? '#34d399' : '#f87171', background: addBrowserMsg.startsWith('✓') ? 'rgba(52,211,153,0.08)' : 'rgba(248,113,113,0.08)' }}
               >
                 {addBrowserMsg}
+              </div>
+            )}
+
+            {/* Pre-login memories import */}
+            {mergeCount === 0 && (
+              <div>
+                <button
+                  onClick={handleCheckPreLoginMemories}
+                  disabled={mergeChecking}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-opacity hover:opacity-80 disabled:opacity-40"
+                  style={{ background: '#1e1e2e', border: '1px solid #2d2d3e', color: '#9ca3af' }}
+                >
+                  {mergeChecking ? <Loader2 size={11} className="animate-spin" /> : <User size={11} />}
+                  {mergeChecking ? 'Checking…' : 'Import pre-login memories'}
+                </button>
               </div>
             )}
 
@@ -380,15 +571,14 @@ function Options() {
                 {addingBrowser ? <Loader2 size={11} className="animate-spin" /> : <MonitorSmartphone size={11} />}
                 Add This Browser
               </button>
-              <a
-                href="http://localhost:8000/dashboard"
-                target="_blank"
-                rel="noopener noreferrer"
+              <button
+                onClick={async () => { const k = await getApiKey(); chrome.tabs.create({ url: `http://localhost:8000/dashboard${k ? `?token=${k}` : ''}` }); }}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-opacity hover:opacity-80"
-                style={{ background: '#1e1e2e', border: '1px solid #2d2d3e', color: '#9ca3af' }}
+                style={{ background: '#1e1e2e', border: '1px solid #2d2d3e', color: '#9ca3af', cursor: 'pointer' }}
+                title="Open SHAIL macOS dashboard"
               >
-                <ExternalLink size={11} /> Dashboard
-              </a>
+                <ExternalLink size={11} /> Open SHAIL
+              </button>
             </div>
           </div>
         )}

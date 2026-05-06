@@ -33,6 +33,11 @@ LOG_EXTS = {".log"}
 
 _vector_store: Optional[VectorStore] = None
 
+# Collection names for the four memory tiers
+COLLECTION_IMPORTANT = "shail_important"
+COLLECTION_EPHEMERAL  = "shail_ephemeral"
+COLLECTION_LEGACY     = "shail_rag"          # pre-existing data, keep readable
+
 
 def _get_store() -> VectorStore:
     global _vector_store
@@ -45,6 +50,14 @@ def _get_store() -> VectorStore:
             dim=settings.rag_embedding_dim,
         )
     return _vector_store
+
+
+def get_tier_store(collection: str) -> VectorStore:
+    """Return a VectorStore view scoped to a specific memory-tier collection."""
+    base = _get_store()
+    if hasattr(base, "get_collection"):
+        return base.get_collection(collection)
+    return base
 
 
 def _chunk_text(text: str, chunk_size: int, overlap: int) -> List[str]:

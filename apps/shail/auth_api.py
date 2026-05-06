@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 from apps.shail.auth_store import (
     create_api_key,
     create_user,
+    get_user_by_email,
     get_user_by_id,
     list_api_keys,
     revoke_api_key,
@@ -50,6 +51,25 @@ async def get_current_user(
     """
     if not credentials:
         raise HTTPException(status_code=401, detail="Authorization required")
+    key = credentials.credentials
+    user_id = get_user_by_api_key(key)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid or revoked API key")
+    touch_api_key_last_used(key)
+    touch_user_last_seen(user_id)
+    return user_id
+
+
+async def get_user_or_local(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_security),
+) -> str:
+    """
+    FastAPI dependency. Returns user_id when a valid Bearer token is present,
+    or the literal string "local" when no token is supplied.
+    Invalid tokens still raise 401 — this is for unauthenticated dev mode only.
+    """
+    if not credentials:
+        return "local"
     key = credentials.credentials
     user_id = get_user_by_api_key(key)
     if not user_id:
@@ -182,3 +202,112 @@ async def delete_key(
     if not ok:
         raise HTTPException(status_code=404, detail="Key not found or not owned by you")
     return RevokeResponse(ok=True)
+
+
+# ── Apple Sign In ─────────────────────────────────────────────────────────────
+
+class AppleSignInRequest(BaseModel):
+    identity_token: str
+    full_name: str = ""
+
+
+_APPLE_JWKS_URL = "https://appleid.apple.com/auth/keys"
+_APPLE_ISSUER   = "https://appleid.apple.com"
+_apple_jwks_cache: dict = {"keys": None, "fetched_at": 0.0}
+
+
+def _get_apple_jwks() -> list:
+    """Fetch Apple's JWKS once per hour."""
+    import time as _time
+    import httpx as _httpx
+    if _apple_jwks_cache["keys"] and (_time.time() - _apple_jwks_cache["fetched_at"]) < 3600:
+        return _apple_jwks_cache["keys"]
+    with _httpx.Client(timeout=5.0) as c:
+        r = c.get(_APPLE_JWKS_URL)
+        r.raise_for_status()
+        keys = r.json().get("keys", [])
+    _apple_jwks_cache["keys"] = keys
+    _apple_jwks_cache["fetched_at"] = _time.time()
+    return keys
+
+
+@auth_router.post("/apple", response_model=AuthResponse)
+async def apple_sign_in(req: AppleSignInRequest) -> AuthResponse:
+    """
+    Verify an Apple identity token (JWT signed by Apple) and return a SHAIL API key.
+
+    The audience is the Sign In With Apple "service ID" or bundle ID, supplied via
+    the APPLE_AUDIENCE env var (e.g. com.shail.ShailUI).
+    """
+    import os as _os
+    try:
+        import jwt as _jwt
+        from jwt import PyJWKClient  # noqa: F401
+    except Exception:
+        raise HTTPException(status_code=500, detail="PyJWT not installed on backend")
+
+    audience = _os.getenv("APPLE_AUDIENCE", "")
+    if not audience:
+        raise HTTPException(status_code=503, detail="APPLE_AUDIENCE env var not configured on backend")
+
+    # Decode unverified header to find kid
+    try:
+        header = _jwt.get_unverified_header(req.identity_token)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Malformed identity_token: {exc}")
+
+    kid = header.get("kid")
+    keys = _get_apple_jwks()
+    matching = next((k for k in keys if k.get("kid") == kid), None)
+    if not matching:
+        raise HTTPException(status_code=401, detail="No matching Apple JWKS key")
+
+    try:
+        public_key = _jwt.algorithms.RSAAlgorithm.from_jwk(matching)
+        claims = _jwt.decode(
+            req.identity_token,
+            key=public_key,
+            algorithms=["RS256"],
+            audience=audience,
+            issuer=_APPLE_ISSUER,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail=f"Invalid Apple token: {exc}")
+
+    sub = claims.get("sub")
+    email = claims.get("email", "")
+    if not sub:
+        raise HTTPException(status_code=401, detail="Apple token has no sub claim")
+
+    # Use sub as a stable identifier; prefer existing user by email if available
+    name = req.full_name or claims.get("email", "Apple User")
+    existing = get_user_by_email(email) if email else None
+    if existing:
+        user_id = existing["id"]
+        api_key = create_api_key(user_id, label="Apple SSO")
+        return AuthResponse(
+            user_id=user_id,
+            api_key=api_key,
+            email=existing["email"],
+            name=existing["name"] or name,
+        )
+
+    # New user — derive a placeholder password they cannot use directly
+    import secrets as _secrets
+    placeholder_pw = _secrets.token_urlsafe(32)
+    try:
+        user = create_user(email=email or f"apple_{sub}@privaterelay.appleid.com",
+                            password=placeholder_pw, name=name)
+    except ValueError:
+        # Race: created concurrently
+        user = get_user_by_email(email or f"apple_{sub}@privaterelay.appleid.com")
+        if not user:
+            raise HTTPException(status_code=500, detail="Failed to create user")
+
+    api_key = create_api_key(user["id"], label="Apple SSO")
+    return AuthResponse(
+        user_id=user["id"],
+        api_key=api_key,
+        email=user["email"],
+        name=user["name"] or name,
+    )

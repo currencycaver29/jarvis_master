@@ -13,9 +13,12 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
+import sqlite3
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from io import StringIO
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -99,27 +102,40 @@ def _namespace(user_id: str) -> str:
 
 def _get_all_user_records(user_id: str):
     """
-    Return all records from ChromaDB for a given user namespace.
-    Returns list of (id, document, metadata) tuples.
+    Return all records from ChromaDB visible to this user.
+    Queries user-specific namespace + legacy anonymous namespaces so
+    captures from the browser extension (browser_memory) and macOS
+    watchdog (local) appear in the dashboard even before re-auth.
+    Returns list of (id, document, metadata) tuples, deduplicated by id.
     """
     store = _get_store()
     if not hasattr(store, "collection"):
         return []
 
-    namespace = _namespace(user_id)
-    try:
-        result = store.collection.get(
-            where={"namespace": namespace},
-            include=["documents", "metadatas"],
-        )
-    except Exception as exc:
-        logger.error("Failed to fetch all user records: %s", exc)
-        return []
+    # Always include user namespace; also pull anonymous captures
+    namespaces = [_namespace(user_id), "browser_memory", "local"]
+    all_records: list = []
+    seen: set = set()
 
-    ids   = result.get("ids", [])
-    docs  = result.get("documents", []) or [""] * len(ids)
-    metas = result.get("metadatas", []) or [{}] * len(ids)
-    return list(zip(ids, docs, metas))
+    for ns in namespaces:
+        try:
+            result = store.collection.get(
+                where={"namespace": ns},
+                include=["documents", "metadatas"],
+            )
+        except Exception as exc:
+            logger.warning("Failed to fetch records for namespace %s: %s", ns, exc)
+            continue
+
+        ids   = result.get("ids", [])
+        docs  = result.get("documents", []) or [""] * len(ids)
+        metas = result.get("metadatas", []) or [{}] * len(ids)
+        for rid, doc, meta in zip(ids, docs, metas):
+            if rid not in seen:
+                seen.add(rid)
+                all_records.append((rid, doc, meta))
+
+    return all_records
 
 
 def _record_to_item(rid: str, doc: str, meta: dict, include_content: bool = False) -> MemoryItem:
@@ -164,11 +180,26 @@ async def list_memories(
     limit: int = 20,
     q: str = "",
     source: str = "",
+    tier: str = "",
     pinned: Optional[bool] = None,
     user_id: str = Depends(get_current_user),
 ) -> MemoryPage:
-    """Browse / search user memories with pagination."""
+    """Browse / search user memories with pagination.
+
+    `source` matches both the new `source` metadata (e.g. `macos_fs`,
+    `browser_chatgpt`) and the legacy `sourceApp` field.
+    `tier` filters by ephemeral|important.
+    """
     records = _get_all_user_records(user_id)
+
+    # Apply tier + source filters at the metadata level before mapping.
+    if tier:
+        records = [(rid, doc, meta) for rid, doc, meta in records if (meta or {}).get("tier") == tier]
+    if source:
+        records = [
+            (rid, doc, meta) for rid, doc, meta in records
+            if (meta or {}).get("source") == source or (meta or {}).get("sourceApp") == source
+        ]
 
     items = [_record_to_item(rid, doc, meta) for rid, doc, meta in records]
 
@@ -179,8 +210,6 @@ async def list_memories(
             it for it in items
             if q_lower in it.title.lower() or q_lower in it.summary.lower()
         ]
-    if source:
-        items = [it for it in items if it.sourceApp == source]
     if pinned is not None:
         items = [it for it in items if it.pinned == pinned]
 
@@ -270,8 +299,27 @@ async def delete_memory(
     memory_id: str,
     user_id: str = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    """Delete a memory."""
+    """Delete a memory.
+
+    SECURITY (Sprint 1): verify ownership via namespace BEFORE delete.
+    Without this any authenticated user could delete any memory by id since
+    memory_ids are not namespace-scoped at the storage layer.
+    """
     store = _get_store()
+    if not hasattr(store, "collection"):
+        raise HTTPException(status_code=404, detail="Memory not found")
+
+    namespace = _namespace(user_id)
+    try:
+        owner = store.collection.get(
+            ids=[memory_id],
+            where={"namespace": namespace},
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    if not owner.get("ids"):
+        raise HTTPException(status_code=404, detail="Memory not found")
+
     try:
         ok = store.delete(memory_id)
     except Exception as exc:
@@ -284,10 +332,30 @@ async def bulk_delete(
     req: BulkDeleteRequest,
     user_id: str = Depends(get_current_user),
 ) -> BulkDeleteResponse:
-    """Delete multiple memories at once."""
+    """Delete multiple memories at once.
+
+    SECURITY (Sprint 1): scope delete to caller's namespace. Fetch all ids
+    that belong to the user once, intersect with requested ids, delete only
+    the intersection. IDs the user does not own are silently skipped.
+    """
     store = _get_store()
+    if not hasattr(store, "collection"):
+        return BulkDeleteResponse(deleted=0)
+
+    namespace = _namespace(user_id)
+    try:
+        owned = store.collection.get(
+            ids=req.ids,
+            where={"namespace": namespace},
+        )
+    except Exception:
+        return BulkDeleteResponse(deleted=0)
+
+    owned_ids = set(owned.get("ids", []))
     deleted = 0
     for memory_id in req.ids:
+        if memory_id not in owned_ids:
+            continue
         try:
             if store.delete(memory_id):
                 deleted += 1
@@ -395,3 +463,198 @@ async def export_memories(
             media_type="application/json",
             headers={"Content-Disposition": 'attachment; filename="shail_memories.json"'},
         )
+
+
+# ── Memory Graph ───────────────────────────────────────────────────────────────
+
+class GraphNode(BaseModel):
+    id: str
+    label: str
+    type: str
+    sourceApp: str
+    timestamp: str
+    importance: float = 0.5
+
+
+class GraphEdge(BaseModel):
+    source: str
+    target: str
+
+
+class MemoryGraph(BaseModel):
+    nodes: List[GraphNode]
+    edges: List[GraphEdge]
+
+
+@dashboard_router.get("/memories/graph", response_model=MemoryGraph)
+async def memory_graph(
+    user_id: str = Depends(get_current_user),
+) -> MemoryGraph:
+    """Return a force-graph-compatible node/edge structure for all memories."""
+    records = _get_all_user_records(user_id)
+
+    nodes: List[GraphNode] = []
+    edges: List[GraphEdge] = []
+
+    # Group by sourceUrl (same URL → edge) and by date bucket (same day → edge)
+    url_to_ids: dict[str, list[str]] = defaultdict(list)
+    day_to_ids: dict[str, list[str]] = defaultdict(list)
+
+    for rid, _doc, meta in records:
+        meta = meta or {}
+        ts    = meta.get("timestamp", datetime.now(timezone.utc).isoformat())
+        label = meta.get("title") or meta.get("sourceUrl", rid)[:60]
+        importance = float(meta.get("importance_score", 0.5))
+
+        nodes.append(GraphNode(
+            id=rid,
+            label=label,
+            type=meta.get("eventType", "page_visit"),
+            sourceApp=meta.get("sourceApp", "web"),
+            timestamp=ts,
+            importance=importance,
+        ))
+
+        url = meta.get("sourceUrl", "")
+        if url:
+            url_to_ids[url].append(rid)
+
+        day = ts[:10]
+        day_to_ids[day].append(rid)
+
+    # Edges: same URL
+    for ids in url_to_ids.values():
+        for i in range(len(ids) - 1):
+            edges.append(GraphEdge(source=ids[i], target=ids[i + 1]))
+
+    # Edges: same day (cap per day to avoid explosion)
+    for ids in day_to_ids.values():
+        bucket = ids[:8]
+        for i in range(len(bucket) - 1):
+            edges.append(GraphEdge(source=bucket[i], target=bucket[i + 1]))
+
+    return MemoryGraph(nodes=nodes, edges=edges)
+
+
+# ── Share tokens ───────────────────────────────────────────────────────────────
+
+def _share_db_path() -> str:
+    from apps.shail.settings import get_settings
+    return get_settings().sqlite_path
+
+
+def _ensure_share_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS share_tokens (
+            token      TEXT PRIMARY KEY,
+            memory_id  TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+
+
+class ShareResponse(BaseModel):
+    url: str
+    token: str
+
+
+@dashboard_router.post("/memories/share/{memory_id}", response_model=ShareResponse)
+async def create_share(
+    memory_id: str,
+    user_id: str = Depends(get_current_user),
+) -> ShareResponse:
+    """Generate a shareable link token for a memory."""
+    token = secrets.token_urlsafe(16)
+    created_at = datetime.now(timezone.utc).isoformat()
+
+    with sqlite3.connect(_share_db_path()) as conn:
+        _ensure_share_table(conn)
+        conn.execute(
+            "INSERT OR REPLACE INTO share_tokens (token, memory_id, created_at) VALUES (?,?,?)",
+            (token, memory_id, created_at),
+        )
+        conn.commit()
+
+    return ShareResponse(
+        url=f"http://localhost:8000/api/v2/share/{token}",
+        token=token,
+    )
+
+
+@dashboard_router.get("/share/{token}")
+async def view_share(token: str) -> Dict[str, Any]:
+    """Public (no auth) endpoint — resolve share token → memory item."""
+    with sqlite3.connect(_share_db_path()) as conn:
+        _ensure_share_table(conn)
+        row = conn.execute(
+            "SELECT memory_id FROM share_tokens WHERE token = ?", (token,)
+        ).fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Share link not found or expired")
+
+    memory_id = row[0]
+    store = _get_store()
+    if not hasattr(store, "collection"):
+        raise HTTPException(status_code=404, detail="Memory not found")
+
+    try:
+        result = store.collection.get(
+            ids=[memory_id],
+            include=["documents", "metadatas"],
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    if not result.get("ids"):
+        raise HTTPException(status_code=404, detail="Memory not found")
+
+    item = _record_to_item(
+        result["ids"][0],
+        result["documents"][0] or "",
+        result["metadatas"][0] or {},
+        include_content=True,
+    )
+    return item.dict()
+
+
+# ── Capacity ───────────────────────────────────────────────────────────────────
+
+class CapacityInfo(BaseModel):
+    used_bytes: int
+    limit_bytes: int
+    used_human: str
+    percent: float
+    plan: str
+
+
+def _human(b: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if b < 1024:
+            return f"{b:.1f} {unit}"
+        b //= 1024
+    return f"{b:.1f} TB"
+
+
+@dashboard_router.get("/capacity", response_model=CapacityInfo)
+async def capacity(
+    user_id: str = Depends(get_current_user),
+) -> CapacityInfo:
+    """Report ChromaDB disk usage vs. free-tier limit (500 MB)."""
+    from apps.shail.settings import get_settings
+    chroma_path = Path(get_settings().rag_chroma_path)
+    used = 0
+    if chroma_path.exists():
+        used = sum(f.stat().st_size for f in chroma_path.rglob("*") if f.is_file())
+
+    limit = 500 * 1024 * 1024  # 500 MB
+    return CapacityInfo(
+        used_bytes=used,
+        limit_bytes=limit,
+        used_human=_human(used),
+        percent=round(used / limit * 100, 1),
+        plan="free",
+    )

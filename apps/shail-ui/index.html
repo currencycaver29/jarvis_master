@@ -2,13 +2,22 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <link rel="icon" type="image/png" href="/dashboard/logo.png" />
+    <link rel="apple-touch-icon" href="/dashboard/logo.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Shail - AI Operating System</title>
+    <title>SHAIL — Memory Dashboard</title>
+    <style>
+      *, *::before, *::after { box-sizing: border-box; }
+      body { margin: 0; background: #000; color: #fff; -webkit-font-smoothing: antialiased; }
+      ::-webkit-scrollbar { width: 4px; height: 4px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb { background: #1e1e1e; border-radius: 2px; }
+      @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    </style>
   </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
 

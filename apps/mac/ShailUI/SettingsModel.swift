@@ -5,7 +5,7 @@ struct APISettings: Codable {
 }
 
 struct LLMSettings: Codable {
-    var model: String = "gemini-2.0-flash"
+    var model: String = "gemma3:4b-it-q4_K_M"
     var temperature: Double = 0.7
 }
 

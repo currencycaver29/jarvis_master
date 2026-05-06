@@ -35,22 +35,51 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var launcherObserver: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Set regular activation briefly so the Input-Monitoring / Accessibility
+        // permission dialogs can receive focus (accessory apps lose focus before
+        // the user can click "Open System Settings").
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+
         setupMenubar()
         setupFloatingPanel()
         observeLauncherState()
         BackendManager.shared.startMonitoring()
-        NSApp.setActivationPolicy(.accessory)
+
+        // Return to accessory (no Dock icon) after a short delay — enough time
+        // for any permission dialogs to appear and be fully interactive.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            NSApp.setActivationPolicy(.accessory)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         hotkeyListener?.stopMonitoring()
         BackendManager.shared.stopMonitoring()
         launcher.stopAll()
+        // Kill Ollama — covers PID-file misses (pre-existing Ollama, forked child)
+        let task = Process()
+        task.launchPath = "/usr/bin/pkill"
+        task.arguments  = ["-x", "ollama"]
+        try? task.run()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         windowManager?.show()
         return true
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            guard url.scheme?.lowercased() == "shail" else { continue }
+            switch url.host?.lowercased() {
+            case "dashboard", "memory":
+                openBirdsEyeWindow()
+            default:
+                windowManager?.show()
+            }
+        }
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     // MARK: - Menubar
@@ -126,9 +155,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         coordinator.collapseToLauncher = { [weak self] in
             self?.windowManager?.collapseToLauncher()
         }
-        coordinator.expandToOfflineDashboard = { [weak self] in
-            self?.windowManager?.showOfflineDashboard()
-        }
         coordinator.hidePanel = { [weak self] in
             self?.windowManager?.hide()
         }
@@ -137,6 +163,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         coordinator.openBirdsEyeWindow = { [weak self] in
             self?.openBirdsEyeWindow()
+        }
+        coordinator.expandToChatOverlay = { [weak self] in
+            self?.windowManager?.expandToChatOverlay()
         }
         windowManager?.showAsPopup()
     }
@@ -168,7 +197,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.title = "SHAIL — Bird's Eye Workflow"
         window.titlebarAppearsTransparent = true
         window.isMovableByWindowBackground = true
-        window.backgroundColor = NSColor(red: 0.04, green: 0.04, blue: 0.09, alpha: 1)
+        // Transparent so NSVisualEffectView glassmorphism blends with desktop
+        window.backgroundColor = .clear
+        window.isOpaque = false
         window.minSize = NSSize(width: 700, height: 500)
         // Prevent NSWindow from releasing itself on close — avoids EXC_BAD_ACCESS on reopen
         window.isReleasedWhenClosed = false
@@ -177,7 +208,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .environmentObject(coordinator)
             .environmentObject(BackendManager.shared)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(nsColor: NSColor(red: 0.04, green: 0.04, blue: 0.09, alpha: 1)))
+            .background(Color.clear)
 
         let hc = NSHostingController(rootView: rootView)
         window.contentViewController = hc
@@ -187,12 +218,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.birdsEyeWindow = nil
             self?.birdsEyeWindowDelegate = nil
             self?.birdsEyeHostingController = nil
+            self?.coordinator.isBirdsEyeOpen = false
         }
         window.delegate = delegate
         birdsEyeWindowDelegate = delegate
 
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        coordinator.isBirdsEyeOpen = true
 
         birdsEyeWindow = window
         birdsEyeHostingController = hc

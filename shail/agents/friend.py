@@ -19,7 +19,7 @@ from shail.tools.monitor import (
     get_screen_info,
     wait_for_window
 )
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_ollama import ChatOllama
 from langchain.agents import create_react_agent, AgentExecutor
 from apps.shail.settings import get_settings
 
@@ -39,10 +39,9 @@ class FriendAgent(AbstractAgent):
 
     def __init__(self):
         settings = get_settings()
-        self.llm = ChatGoogleGenerativeAI(
-            model=settings.gemini_model,
-            google_api_key=settings.gemini_api_key or None,
-            temperature=0.8  # Higher temperature for more conversational, friendly responses
+        self.llm = ChatOllama(
+            model=settings.ollama_chat_model,
+            temperature=0.8,
         )
         
         # Desktop control and OS tools

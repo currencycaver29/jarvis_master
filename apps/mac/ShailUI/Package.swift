@@ -41,6 +41,7 @@ let package = Package(
                 "ChatService.swift",
                 "BackendWebSocketClient.swift",
                 "ChatMessage.swift",
+                "ChatSession.swift",
                 "ChatHistoryService.swift",
                 "ChatHistoryView.swift",
                 "TaskService.swift",
@@ -54,7 +55,8 @@ let package = Package(
                 "DesktopListView.swift",
                 "BackendManager.swift",
                 "MockDataProvider.swift",
-                "OfflineDashboardView.swift"
+                "QueryService.swift",
+                "AuthView.swift"
             ],
             resources: [
                 .process("Resources")

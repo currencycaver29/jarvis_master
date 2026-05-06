@@ -74,6 +74,32 @@ struct ServicesSettingsView: View {
                             .buttonStyle(.borderedProminent)
                     }
                 }
+                if !launcher.lastError.isEmpty {
+                    DisclosureGroup("Startup log (last 30 lines)") {
+                        ScrollView {
+                            Text(launcher.lastError)
+                                .font(.system(.caption2, design: .monospaced))
+                                .foregroundColor(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                        }
+                        .frame(maxHeight: 180)
+                    }
+                }
+                if !launcher.lastHealthSnapshot.isEmpty {
+                    DisclosureGroup("Last /health response") {
+                        Text(launcher.lastHealthSnapshot)
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    }
+                }
+                Button("Open API log") {
+                    let path = launcher.repoRoot + "/logs/shail_api.log"
+                    NSWorkspace.shared.open(URL(fileURLWithPath: path))
+                }
+                .disabled(!launcher.hasValidPath)
             }
         }
         .formStyle(.grouped)
@@ -154,11 +180,57 @@ struct AdvancedSettingsView: View {
 
 struct AccountSettingsView: View {
     @Binding var settings: ShailSettings
-    @State private var showKey = false
+    @StateObject private var auth = AuthManager.shared
+    @State private var showKey      = false
+    @State private var showLogin    = false
 
     var body: some View {
         Form {
-            Section("API Key") {
+            // ── Auth section ──────────────────────────────────────────
+            Section("Account") {
+                if auth.isAuthenticated {
+                    HStack(spacing: 12) {
+                        ZStack {
+                            Circle().fill(LinearGradient(
+                                colors: [Color(red:0.36,green:0.61,blue:1),
+                                         Color(red:0.56,green:0.35,blue:1)],
+                                startPoint: .topLeading, endPoint: .bottomTrailing))
+                                .frame(width: 36, height: 36)
+                            Text(auth.avatarInitials)
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundColor(.white)
+                        }
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(auth.userDisplayName)
+                                .font(.system(.body, design: .rounded).weight(.semibold))
+                            Text(auth.userEmail)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Text(auth.provider.rawValue.capitalized + " account")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Button("Sign Out") { auth.signOut() }
+                            .foregroundColor(.red)
+                            .buttonStyle(.plain)
+                    }
+                    .padding(.vertical, 4)
+                } else {
+                    HStack {
+                        Image(systemName: "person.crop.circle.badge.questionmark")
+                            .foregroundColor(.secondary)
+                        Text("Not signed in")
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Button("Sign In…") { showLogin = true }
+                            .buttonStyle(.borderedProminent)
+                    }
+                }
+            }
+
+            // ── API Key section ───────────────────────────────────────
+            Section("Browser API Key") {
                 HStack {
                     if showKey {
                         TextField("shail_...", text: $settings.apiKey)
@@ -175,12 +247,16 @@ struct AccountSettingsView: View {
             }
             if !settings.apiKey.isEmpty {
                 Section("Status") {
-                    Label("API key set — memories isolated to your account",
+                    Label("API key set — browser memories synced",
                           systemImage: "checkmark.seal.fill").foregroundColor(.green)
                 }
             }
         }
         .padding()
+        .sheet(isPresented: $showLogin) {
+            LoginView()
+                .frame(width: 400, height: 580)
+        }
     }
 }
 

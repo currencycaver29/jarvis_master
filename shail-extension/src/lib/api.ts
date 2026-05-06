@@ -11,10 +11,113 @@ import type {
   StatsResult,
 } from '../types/contracts';
 
+// ─── Ascent types ─────────────────────────────────────────────────────────────
+
+export interface TodoItem {
+  id: string;
+  text: string;
+  completed: boolean;
+  order: number;
+}
+
+export interface DeliverableItem {
+  id: string;
+  text: string;
+  description: string;
+  completed: boolean;
+  order: number;
+  todos: TodoItem[];
+  memory_ids: string[];
+}
+
+export interface AscentSummary {
+  id: string;
+  name: string;
+  description: string;
+  status: string;
+  progress: number;
+  deliverable_count: number;
+  todo_count: number;
+  todos_completed: number;
+  created_at: string;
+}
+
+export interface AscentDetail extends AscentSummary {
+  deliverables: DeliverableItem[];
+}
+
+export interface AscentListResponse {
+  items: AscentSummary[];
+  total: number;
+  active_count: number;
+  limit: number;
+  tier: string;
+}
+
+export interface RouteCluster {
+  label: string;
+  axis: 'tag' | 'source';
+  count: number;
+  latest_ts: string;
+  sample_titles: string[];
+}
+
+export interface HorizonItem {
+  label: string;
+  memory_count: number;
+  suggested_name: string;
+  suggested_description: string;
+  sample_titles: string[];
+}
+
 // ─── Local backend config ─────────────────────────────────────────────────────
-// The SHAIL backend (jarvis_master) runs on localhost:8000.
+// Primary uses localhost. Brave (and some hardened browsers) block localhost
+// from extension service workers — 127.0.0.1 bypasses that restriction.
 const LOCAL_BASE   = 'http://localhost:8000/browser';
+const LOCAL_BASE_FB = 'http://127.0.0.1:8000/browser'; // Brave fallback
 const AUTH_BASE    = 'http://localhost:8000/auth';
+const AUTH_BASE_FB = 'http://127.0.0.1:8000/auth';
+const HEALTH_URL   = 'http://localhost:8000/health';
+const HEALTH_URL_FB = 'http://127.0.0.1:8000/health';
+
+/** Single source of truth for "is the backend reachable?".
+ *
+ * Sprint 1 fix: previously returned ok:true on any HTTP 200, even when
+ * /health reported chroma_ready:false (e.g. embedding model not loaded).
+ * Captures would silently 500 after the popup said "online". Now we
+ * distinguish:
+ *   ok:true              — chroma + embedder both ready, captures will work
+ *   ok:false, degraded   — backend reachable but a dep is down (orange)
+ *   ok:false             — backend unreachable (red)
+ */
+export async function pingBackend(): Promise<{
+  ok: boolean;
+  degraded?: boolean;
+  chroma_ready?: boolean;
+  embedder_ready?: boolean;
+  ollama_reachable?: boolean;
+}> {
+  const tryUrl = async (url: string) => {
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), 2000);
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(t);
+    if (!res.ok) throw new Error('not_ok');
+    return res.json().catch(() => ({}));
+  };
+  try {
+    let json: Record<string, unknown>;
+    try {
+      json = await tryUrl(HEALTH_URL);
+    } catch {
+      json = await tryUrl(HEALTH_URL_FB); // Brave fallback
+    }
+    const ready = !!(json.chroma_ready && json.embedder_ready);
+    return { ok: ready, degraded: !ready, ...json };
+  } catch {
+    return { ok: false };
+  }
+}
 
 // ─── Auth key helpers (chrome.storage.sync for cross-browser sync) ────────────
 
@@ -50,37 +153,53 @@ export async function getUserId(): Promise<string | null> {
 // ─── Core fetch (local backend) ───────────────────────────────────────────────
 
 async function localFetch<T>(path: string, init?: RequestInit, base = LOCAL_BASE): Promise<T> {
-  const controller = new AbortController();
-  const timeoutId  = setTimeout(() => controller.abort(), 8000);
-
-  // Inject API key if available (from storage.sync — cross-browser)
   const apiKey = await getApiKey();
 
-  try {
-    const res = await fetch(`${base}${path}`, {
-      ...init,
-      signal: controller.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {}),
-        ...(init?.headers ?? {}),
-      },
-    });
-    clearTimeout(timeoutId);
-
-    if (res.status === 401) throw new Error('NOT_SIGNED_IN');
-    if (res.status === 404) throw new Error('MEMORY_NOT_FOUND');
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      throw new Error(`SHAIL ${path} → ${res.status}: ${body.slice(0, 200)}`);
+  const attempt = async (baseUrl: string): Promise<T> => {
+    const controller = new AbortController();
+    const timeoutId  = setTimeout(() => controller.abort(), 8000);
+    try {
+      const res = await fetch(`${baseUrl}${path}`, {
+        ...init,
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {}),
+          ...(init?.headers ?? {}),
+        },
+      });
+      clearTimeout(timeoutId);
+      if (res.status === 401) throw new Error('NOT_SIGNED_IN');
+      if (res.status === 404) throw new Error('MEMORY_NOT_FOUND');
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`SHAIL ${path} → ${res.status}: ${body.slice(0, 200)}`);
+      }
+      if (res.status === 204) return undefined as T;
+      return res.json() as Promise<T>;
+    } catch (err) {
+      clearTimeout(timeoutId);
+      const msg = (err as Error).message ?? '';
+      if ((err as Error).name === 'AbortError') throw new Error('BACKEND_TIMEOUT');
+      if (/failed to fetch|networkerror|load failed/i.test(msg)) throw new Error('BACKEND_OFFLINE');
+      throw err;
     }
-    if (res.status === 204) return undefined as T;
-    return res.json() as Promise<T>;
+  };
+
+  // Primary attempt
+  try {
+    return await attempt(base);
   } catch (err) {
-    clearTimeout(timeoutId);
-    const msg = (err as Error).message ?? '';
-    if ((err as Error).name === 'AbortError') throw new Error('BACKEND_TIMEOUT');
-    if (/failed to fetch|networkerror|load failed/i.test(msg)) throw new Error('BACKEND_OFFLINE');
+    // Brave (and some hardened browsers) block localhost from service workers.
+    // Retry with 127.0.0.1 before surfacing BACKEND_OFFLINE to the user.
+    if ((err as Error).message === 'BACKEND_OFFLINE') {
+      const fallback = base === LOCAL_BASE ? LOCAL_BASE_FB
+                     : base === AUTH_BASE  ? AUTH_BASE_FB
+                     : null;
+      if (fallback) {
+        return await attempt(fallback);
+      }
+    }
     throw err;
   }
 }
@@ -167,29 +286,40 @@ export const api = {
   /**
    * Search memories.
    *
-   * Empty query → browse mode: reads from shail_doc_index in local storage.
-   *               ZERO network calls. Always instant.
+   * Empty query  → browse mode: calls POST /browser/search with query:"" so the
+   *                backend returns all memories in the user's namespace, newest
+   *                first. Falls back to shail_doc_index if backend is unreachable.
    *
-   * Non-empty query → semantic search via SHAIL backend (Gemini + ChromaDB KNN).
-   *                   Returns results sorted by relevance score descending.
+   * Non-empty query → semantic search via ChromaDB KNN, keyword-boosted client-side.
    */
   async search(payload: SearchRequest): Promise<ContextBundle> {
     const isEmpty = !payload.query?.trim();
     let items: MemoryRecord[] = [];
 
     if (isEmpty) {
-      // ── Browse: read from local index (no network) ────────────────────────
-      const stored = await browser.storage.local.get('shail_doc_index');
-      const index  = (stored['shail_doc_index'] as DocIndexEntry[]) ?? [];
-      items = index
-        .slice(0, 50)
-        .sort((a, b) => b.timestamp.localeCompare(a.timestamp))
-        .map(indexEntryToRecord);
+      // ── Browse: always try backend first so signed-in users see all their
+      // memories across devices, not just what the local index happened to cache.
+      try {
+        const resp = await localFetch<{ items: MemoryRecord[]; total: number }>(
+          '/search',
+          { method: 'POST', body: JSON.stringify({ query: '', k: 100, after: payload.after ?? undefined }) },
+        );
+        items = resp.items;
+      } catch (err) {
+        const msg = (err as Error).message ?? '';
+        if (msg !== 'BACKEND_OFFLINE' && msg !== 'BACKEND_TIMEOUT') throw err;
+        // Backend unreachable — fall back to local index cache
+        const stored = await browser.storage.local.get('shail_doc_index');
+        const index  = (stored['shail_doc_index'] as DocIndexEntry[]) ?? [];
+        items = index
+          .sort((a, b) => b.timestamp.localeCompare(a.timestamp))
+          .map(indexEntryToRecord);
+      }
     } else {
       // ── Search: call backend ──────────────────────────────────────────────
       const resp = await localFetch<{ items: MemoryRecord[]; total: number }>(
         '/search',
-        { method: 'POST', body: JSON.stringify({ query: payload.query.trim(), k: 30 }) },
+        { method: 'POST', body: JSON.stringify({ query: payload.query.trim(), k: 30, after: payload.after ?? undefined }) },
       );
       items = resp.items;
       // Results from backend already sorted by relevance score — preserve order.
@@ -322,6 +452,34 @@ export const api = {
     return Promise.reject(new Error('Guidance not implemented yet'));
   },
 
+  // ── Ascents ───────────────────────────────────────────────────────────────
+
+  async listAscents(): Promise<AscentListResponse> {
+    return localFetch<AscentListResponse>('/ascents', undefined, 'http://localhost:8000/browser');
+  },
+
+  async getAscent(id: string): Promise<AscentDetail> {
+    return localFetch<AscentDetail>(`/ascents/${id}`, undefined, 'http://localhost:8000/browser');
+  },
+
+  async toggleTodo(ascentId: string, todoId: string, completed: boolean): Promise<AscentDetail> {
+    return localFetch<AscentDetail>(
+      `/ascents/${ascentId}/todos/${todoId}`,
+      { method: 'PUT', body: JSON.stringify({ completed }) },
+      'http://localhost:8000/browser',
+    );
+  },
+
+  // ── Routes + Horizon ──────────────────────────────────────────────────────
+
+  async routes(): Promise<{ routes: RouteCluster[] }> {
+    return localFetch<{ routes: RouteCluster[] }>('/routes');
+  },
+
+  async horizon(): Promise<{ items: HorizonItem[] }> {
+    return localFetch<{ items: HorizonItem[] }>('/horizon');
+  },
+
   // ── Auth ──────────────────────────────────────────────────────────────────
 
   async register(
@@ -389,6 +547,51 @@ export const api = {
 
   async addKey(label: string): Promise<{ key: string; label: string }> {
     return localFetch('/keys', { method: 'POST', body: JSON.stringify({ label }) }, AUTH_BASE);
+  },
+
+  // ── Capture settings ──────────────────────────────────────────────────────
+
+  async captureSettings(): Promise<{ capture_enabled: boolean; blocked_domains: string[]; ollama_model: string; external_api_key: string }> {
+    return localFetch('/capture-settings');
+  },
+
+  async putCaptureSettings(body: { blocked_domains?: string[]; capture_enabled?: boolean; ollama_model?: string }): Promise<void> {
+    await localFetch('/capture-settings', { method: 'PUT', body: JSON.stringify(body) });
+  },
+
+  // ── Google OAuth helpers ──────────────────────────────────────────────────
+
+  /** Returns the Google OAuth start URL for the given state token. */
+  googleStartUrl(state: string): string {
+    return `http://localhost:8000/auth/google/start?state=${encodeURIComponent(state)}`;
+  },
+
+  /**
+   * Single poll of the Google token endpoint.
+   * Returns the token payload on 200, null on 204 (still waiting).
+   * Throws on error.
+   */
+  async pollGoogleToken(
+    state: string,
+  ): Promise<{ email: string; name: string; api_key: string; user_id: string } | null> {
+    const controller = new AbortController();
+    const timeoutId  = setTimeout(() => controller.abort(), 5000);
+    try {
+      const res = await fetch(
+        `http://localhost:8000/auth/google/token?state=${encodeURIComponent(state)}`,
+        { signal: controller.signal },
+      );
+      clearTimeout(timeoutId);
+      if (res.status === 204) return null;  // still waiting
+      if (!res.ok) throw new Error(`Google token poll failed: ${res.status}`);
+      return res.json();
+    } catch (err) {
+      clearTimeout(timeoutId);
+      const msg = (err as Error).message ?? '';
+      if ((err as Error).name === 'AbortError') throw new Error('BACKEND_TIMEOUT');
+      if (/failed to fetch|networkerror|load failed/i.test(msg)) throw new Error('BACKEND_OFFLINE');
+      throw err;
+    }
   },
 };
 
