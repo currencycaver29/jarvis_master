@@ -78,6 +78,7 @@ def _get_namespace(
 class CaptureRequest(BaseModel):
     """Mirrors CaptureCandidate from contracts.ts."""
     customId: str = Field(..., description="SHA-256 fingerprint — used as vector store record ID")
+    conversationId: Optional[str] = None  # provider UUID; present when stable customId scheme is active
     eventType: str = Field(..., description="ai_conversation | page_visit | manual")
     sourceApp: str = Field(..., description="chatgpt | claude | gemini | perplexity | web")
     sourceUrl: str
@@ -250,10 +251,9 @@ async def capture_memory(
     else:
         content = f"[web] {req.title or req.sourceUrl}\n\n{req.pageContent or ''}"
 
-    # 20K accommodates ~10-turn AI conversations from the multi-turn extractor.
-    # Blueprint generator caps its own input at 16K; the extra 4K here keeps
-    # the verbatim transcript intact for the Memories detail view.
-    content = content[:20_000]
+    # 50K accommodates full-session transcripts from the Sprint 1 cumulative
+    # session buffer (was 20K / ~10 turns). Blueprint generator self-caps at 16K.
+    content = content[:50_000]
     summary = content[:400]
 
     chunk_count = ingest(
@@ -265,6 +265,7 @@ async def capture_memory(
                 "metadata": {
                     "id": req.customId,
                     "customId": req.customId,
+                    "conversationId": req.conversationId or "",
                     "eventType": req.eventType,
                     "sourceApp": req.sourceApp,
                     "source": f"browser_{req.sourceApp}",

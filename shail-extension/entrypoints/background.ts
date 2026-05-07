@@ -121,12 +121,18 @@ async function handleMessage(
         const dupIndex  = (dupStored[KEY_DOC_INDEX] as DocIndexEntry[]) ?? [];
         const { customId, sourceUrl, eventType } = message.payload;
 
+        // conversationId captures use a stable customId per conversation.
+        // Backend handles upsert idempotently — skip the local ring for these.
+        const hasConversationId = !!(message.payload as { conversationId?: string }).conversationId;
+
         const isDuplicate =
-          // Exact fingerprint match (covers all event types)
-          (customId && dupIndex.some(e => e.customId === customId)) ||
-          // URL match for page visits (same page across different days)
-          (eventType === 'page_visit' &&
-            dupIndex.some(e => e.sourceUrl === sourceUrl && e.eventType === 'page_visit'));
+          !hasConversationId && (
+            // Exact fingerprint match (covers all event types)
+            (customId && dupIndex.some(e => e.customId === customId)) ||
+            // URL match for page visits (same page across different days)
+            (eventType === 'page_visit' &&
+              dupIndex.some(e => e.sourceUrl === sourceUrl && e.eventType === 'page_visit'))
+          );
 
         if (isDuplicate) {
           return { ok: true, data: { status: 'duplicate' } };

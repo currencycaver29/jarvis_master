@@ -1,5 +1,6 @@
 import { sha256 } from './crypto';
 import { isDomainDenied } from './utils';
+import { appendToSessionBuffer, buildFullTranscript } from './session-buffer';
 import type { CaptureCandidate, SitePolicy, SourceApp } from '../types/contracts';
 
 // ─── Policy cache (30s TTL) ───────────────────────────────────────────────────
@@ -50,23 +51,46 @@ export async function sendCapture(candidate: CaptureCandidate): Promise<void> {
 
 /**
  * Builds a CaptureCandidate for an AI conversation turn.
+ *
+ * When conversationId is supplied (Sprint 1+):
+ *   - customId is stable across all captures of the same conversation
+ *   - The session buffer accumulates the full transcript across page refreshes
+ *   - Background dedup ring is bypassed (backend handles upsert idempotently)
+ *
+ * When conversationId is absent (non-conversation pages, unknown URL patterns):
+ *   - Falls back to legacy content-fingerprint customId
+ *   - No buffer involvement
  */
 export async function buildAiCandidate(opts: {
   sourceApp: SourceApp;
   userText: string;
   assistantText: string;
+  conversationId?: string;
 }): Promise<CaptureCandidate> {
   const url = window.location.href;
-  const customId = await makeCaptureId(url, opts.assistantText);
+
+  let customId: string;
+  let finalAssistantText: string;
+
+  if (opts.conversationId) {
+    customId = await sha256('shail_session_' + opts.conversationId);
+    const buffer = await appendToSessionBuffer(opts.conversationId, opts.assistantText);
+    finalAssistantText = buildFullTranscript(buffer);
+  } else {
+    customId = await makeCaptureId(url, opts.assistantText);
+    finalAssistantText = opts.assistantText;
+  }
+
   return {
     customId,
+    conversationId: opts.conversationId,
     eventType: 'ai_conversation',
     sourceApp: opts.sourceApp,
     sourceUrl: url,
     timestamp: new Date().toISOString(),
     title: document.title,
     userText: opts.userText,
-    assistantText: opts.assistantText,
+    assistantText: finalAssistantText,
   };
 }
 

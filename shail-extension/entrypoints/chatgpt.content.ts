@@ -1,5 +1,6 @@
 import { buildAiCandidate, isCaptureAllowed, makeCaptureId, observeWithStability, sendCapture } from '../src/lib/capture';
 import { extractTranscript } from '../src/lib/conversation-extractor';
+import { extractConversationId } from '../src/lib/conversation-id';
 import { scoreContent } from '../src/lib/importance';
 import { showCapturePrompt } from '../src/lib/notify';
 
@@ -52,6 +53,8 @@ export default defineContentScript({
         : transcript.latestAssistantText;
       const userText = transcript.userText;
 
+      const conversationId = extractConversationId(location.href, 'chatgpt');
+
       async function doCapture() {
         if (transcript.latestAssistantText === lastCapturedText) return;
         lastCapturedText = transcript.latestAssistantText;
@@ -59,14 +62,19 @@ export default defineContentScript({
           sourceApp: 'chatgpt',
           userText,
           assistantText: assistantPayload,
+          conversationId: conversationId ?? undefined,
         });
         await sendCapture(candidate);
       }
 
-      const cid = await makeCaptureId(location.href, assistantPayload);
-      const stored = await browser.storage.local.get('shail_doc_index');
-      const index = (stored['shail_doc_index'] as Array<{ customId?: string }>) ?? [];
-      if (index.some(e => e.customId === cid)) return;
+      // Conversation-id captures bypass local dedup — background handles upsert.
+      // Legacy captures still check the local index to avoid redundant API calls.
+      if (!conversationId) {
+        const cid = await makeCaptureId(location.href, assistantPayload);
+        const stored = await browser.storage.local.get('shail_doc_index');
+        const index = (stored['shail_doc_index'] as Array<{ customId?: string }>) ?? [];
+        if (index.some(e => e.customId === cid)) return;
+      }
 
       showCapturePrompt({
         title:     userText || document.title,

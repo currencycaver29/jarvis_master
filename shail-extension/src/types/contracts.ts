@@ -20,8 +20,10 @@ export type SourceApp =
   | 'web';
 
 export interface CaptureCandidate {
-  /** SHA-256 of url + date — used for deduplication */
+  /** SHA-256 fingerprint — stable per conversation when conversationId is present */
   customId: string;
+  /** Provider conversation UUID extracted from the URL (Sprint 1+) */
+  conversationId?: string;
   eventType: EventType;
   sourceApp: SourceApp;
   sourceUrl: string;

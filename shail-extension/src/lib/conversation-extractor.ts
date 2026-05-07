@@ -92,19 +92,22 @@ export function extractTranscript(opts: MultiTurnSelectors): ExtractedTranscript
       assistant: textOf(assistantEls[i]),
     });
   }
-  const recent = turns.slice(-maxTurns);
+  // Sprint 1: removed turns.slice(-maxTurns) — session-buffer now handles
+  // windowing. Full DOM-visible transcript is returned so the backend always
+  // sees the complete conversation, not just the latest window.
+  const _ = maxTurns; // kept in interface for backward compat; no longer slices
 
-  const fullTranscript = recent
+  const fullTranscript = turns
     .map(t => `User: ${t.user}\n\nAssistant: ${t.assistant}`)
     .join('\n\n---\n\n');
 
-  const latestUserText      = recent[recent.length - 1].user;
-  const latestAssistantText = recent[recent.length - 1].assistant;
+  const latestUserText      = turns[turns.length - 1].user;
+  const latestAssistantText = turns[turns.length - 1].assistant;
 
   return {
     userText: latestUserText,
     assistantText: fullTranscript,
-    turnCount: recent.length,
+    turnCount: turns.length,
     latestAssistantText,
   };
 }
