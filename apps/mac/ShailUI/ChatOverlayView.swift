@@ -18,6 +18,7 @@ struct ChatOverlayView: View {
     var body: some View {
         VStack(spacing: 0) {
             chatHeader
+            chatContextChips
             messageList
             if !attachedFiles.isEmpty { attachmentBar }
             inputBar
@@ -110,6 +111,48 @@ struct ChatOverlayView: View {
         .background(Color.white.opacity(0.05))
     }
 
+    // MARK: - Context chips
+
+    private var chatContextChips: some View {
+        let sessionCount = ChatStore.shared.sessions.count
+        let isLive = wsClient.isConnected
+        return ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                if let state = wsClient.currentState {
+                    chatChip(label: "AGENT", value: state.status.capitalized, active: true, color: ShailTheme.primaryBlue)
+                }
+                if sessionCount > 0 {
+                    chatChip(label: "MEM", value: "\(sessionCount) sessions", active: true)
+                }
+                chatChip(label: "WS", value: isLive ? "live" : "offline", active: isLive, color: isLive ? .green : .orange)
+                if let sessionId = coordinator.currentSessionId,
+                   let session = ChatStore.shared.sessions.first(where: { $0.id == sessionId }) {
+                    chatChip(label: "SESSION", value: session.title, active: true, color: .purple)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 5)
+        }
+        .background(Color.white.opacity(0.03))
+        .overlay(Rectangle().frame(height: 1).foregroundColor(.white.opacity(0.06)), alignment: .bottom)
+    }
+
+    private func chatChip(label: String, value: String, active: Bool, color: Color = ShailTheme.primaryBlue) -> some View {
+        HStack(spacing: 4) {
+            Text(label)
+                .font(.system(size: 7, weight: .bold, design: .monospaced))
+                .foregroundColor(.white.opacity(0.4))
+            Text(value)
+                .font(.system(size: 9, design: .rounded))
+                .foregroundColor(active ? color.opacity(0.85) : .white.opacity(0.3))
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 6).padding(.vertical, 3)
+        .background(active ? color.opacity(0.1) : Color.white.opacity(0.04))
+        .overlay(RoundedRectangle(cornerRadius: 4).stroke(active ? color.opacity(0.25) : Color.white.opacity(0.07), lineWidth: 1))
+        .cornerRadius(4)
+    }
+
     // MARK: - Messages
 
     private var messageList: some View {
@@ -119,6 +162,16 @@ struct ChatOverlayView: View {
                     ForEach(coordinator.messages) { msg in
                         MessageBubble(message: msg, isStreaming: msg.id == streamingMsgId)
                             .id(msg.id)
+                        // Route taken card after last assistant message
+                        if msg.id == coordinator.messages.last?.id,
+                           msg.role == .assistant,
+                           !isLoading,
+                           let state = wsClient.currentState,
+                           !state.planSteps.isEmpty {
+                            RouteTakenCard(steps: Array(state.planSteps.prefix(4)))
+                                .padding(.horizontal, 14)
+                                .padding(.top, 2)
+                        }
                     }
                     if let taskId = coordinator.activeTaskId {
                         TaskProgressCard(taskId: taskId)
@@ -175,53 +228,57 @@ struct ChatOverlayView: View {
     // MARK: - Input bar
 
     private var inputBar: some View {
-        HStack(spacing: 8) {
-            // "+" attach button — opens NSOpenPanel for files / images
+        HStack(spacing: 10) {
             Button { pickFiles() } label: {
-                Image(systemName: "plus.circle")
-                    .font(.system(size: 20))
-                    .foregroundColor(.white.opacity(0.45))
+                Image(systemName: "plus")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.5))
+                    .frame(width: 28, height: 28)
+                    .background(Color.white.opacity(0.08))
+                    .clipShape(Circle())
             }
             .buttonStyle(.plain)
-            .help("Attach files or images (⌘+O)")
+            .help("Attach files or images")
 
             TextField(
                 "",
                 text: $inputText,
-                prompt: Text("Reply to SHAIL…").foregroundColor(.white.opacity(0.3))
+                prompt: Text("Reply…").foregroundColor(.white.opacity(0.25))
             )
             .textFieldStyle(.plain)
-            .font(.system(size: 15, design: .rounded))
+            .font(.system(size: 14, design: .rounded))
             .foregroundColor(.white)
             .onSubmit { sendMessage() }
             .disabled(isLoading)
 
             if isLoading {
-                // Stop button — cancels the in-flight streaming task
                 Button { cancelStreaming() } label: {
                     Image(systemName: "stop.circle.fill")
-                        .font(.system(size: 24))
+                        .font(.system(size: 22))
                         .foregroundStyle(Color.red.opacity(0.75))
                 }
                 .buttonStyle(.plain)
                 .help("Stop generation")
             } else {
                 Button { sendMessage() } label: {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 24))
-                        .foregroundStyle(
+                    Image(systemName: inputText.isEmpty && attachedFiles.isEmpty ? "mic" : "arrow.up")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(inputText.isEmpty && attachedFiles.isEmpty ? .white.opacity(0.35) : .white)
+                        .frame(width: 28, height: 28)
+                        .background(
                             (inputText.isEmpty && attachedFiles.isEmpty)
-                                ? AnyShapeStyle(Color.white.opacity(0.2))
+                                ? AnyShapeStyle(Color.white.opacity(0.07))
                                 : AnyShapeStyle(ShailTheme.primaryGradient)
                         )
+                        .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
                 .disabled(inputText.isEmpty && attachedFiles.isEmpty)
             }
         }
-        .padding(.horizontal, 14).padding(.vertical, 11)
-        .background(Color.white.opacity(0.07))
-        .overlay(Rectangle().frame(height: 1).foregroundColor(.white.opacity(0.08)), alignment: .top)
+        .padding(.horizontal, 12).padding(.vertical, 10)
+        .background(Color.white.opacity(0.06))
+        .overlay(Rectangle().frame(height: 1).foregroundColor(.white.opacity(0.07)), alignment: .top)
     }
 
     // MARK: - File picker
@@ -662,6 +719,41 @@ struct TaskProgressCard: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Route taken card
+
+struct RouteTakenCard: View {
+    let steps: [PlanStep]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 5) {
+                Image(systemName: "arrow.triangle.branch")
+                    .font(.system(size: 8, weight: .bold))
+                Text("ROUTE TAKEN · \(steps.count) TOOL\(steps.count == 1 ? "" : "S")")
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+            }
+            .foregroundColor(.white.opacity(0.35))
+
+            ForEach(steps, id: \.stepId) { step in
+                HStack(alignment: .top, spacing: 7) {
+                    Circle()
+                        .fill(step.success == true ? Color.green : step.executed ? ShailTheme.primaryBlue : Color.white.opacity(0.25))
+                        .frame(width: 5, height: 5)
+                        .padding(.top, 4)
+                    Text(step.description)
+                        .font(.system(size: 11, design: .rounded))
+                        .foregroundColor(.white.opacity(0.55))
+                        .lineLimit(1)
+                }
+            }
+        }
+        .padding(.horizontal, 11).padding(.vertical, 9)
+        .background(Color.white.opacity(0.04))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.white.opacity(0.08), lineWidth: 1))
+        .cornerRadius(9)
     }
 }
 

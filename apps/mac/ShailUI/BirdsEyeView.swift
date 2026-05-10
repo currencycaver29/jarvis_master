@@ -5,12 +5,12 @@ import AppKit
 // MARK: - Dashboard tabs
 
 enum BirdsEyeDashboard: String, CaseIterable {
-    case langGraph = "LangGraph"
+    case langGraph = "Knowledge"
     case memory    = "Memory"
 
     var icon: String {
         switch self {
-        case .langGraph: return "network"
+        case .langGraph: return "circle.hexagongrid"
         case .memory:    return "brain"
         }
     }
@@ -22,6 +22,7 @@ struct BirdsEyeView: View {
     @EnvironmentObject var coordinator: ViewCoordinator
     @EnvironmentObject var backendManager: BackendManager
     @StateObject private var wsClient = BackendWebSocketClient()
+    @StateObject private var graphVM  = MemoryDashboardViewModel()
     @State private var selectedNodeId: String?
     @State private var activePanel: BirdsEyeDashboard = .langGraph
 
@@ -178,9 +179,32 @@ struct BirdsEyeView: View {
     @ViewBuilder
     private var contentPanel: some View {
         switch activePanel {
-        case .langGraph: graphContent
+        case .langGraph: knowledgeGraphContent
         case .memory:    MemoryDashboardView()
         }
+    }
+
+    private var knowledgeGraphContent: some View {
+        ZStack {
+            Color(red: 0.05, green: 0.05, blue: 0.08)
+            if graphVM.isLoadingEntries {
+                VStack(spacing: 10) {
+                    ProgressView().tint(.white.opacity(0.4))
+                    Text("Loading knowledge graph…")
+                        .font(.caption).foregroundColor(.white.opacity(0.35))
+                }
+            } else if graphVM.entries.isEmpty {
+                VStack(spacing: 10) {
+                    Image(systemName: "circle.hexagongrid")
+                        .font(.system(size: 52)).foregroundColor(.white.opacity(0.15))
+                    Text("No memories yet — Watchdog captures as you work")
+                        .font(.caption).foregroundColor(.white.opacity(0.3))
+                }
+            } else {
+                MemoryGraphWebView(entries: graphVM.entries)
+            }
+        }
+        .onAppear { graphVM.loadEntries() }
     }
 
     private var graphContent: some View {
@@ -1351,6 +1375,12 @@ struct GlassButtonStyle: ButtonStyle {
 struct MemoryGraphWebView: NSViewRepresentable {
     let entries: [MemoryEntry]
 
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    class Coordinator {
+        var lastEntryCount = -1
+    }
+
     func makeNSView(context: Context) -> WKWebView {
         let cfg = WKWebViewConfiguration()
         let wv  = WKWebView(frame: .zero, configuration: cfg)
@@ -1360,8 +1390,12 @@ struct MemoryGraphWebView: NSViewRepresentable {
     }
 
     func updateNSView(_ wv: WKWebView, context: Context) {
-        let js = buildUpdateJS()
-        wv.evaluateJavaScript(js, completionHandler: nil)
+        guard entries.count != context.coordinator.lastEntryCount else { return }
+        context.coordinator.lastEntryCount = entries.count
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+            let js = self.buildUpdateJS()
+            wv.evaluateJavaScript(js, completionHandler: nil)
+        }
     }
 
     // MARK: - Build initial HTML
@@ -1431,6 +1465,7 @@ struct MemoryGraphWebView: NSViewRepresentable {
           svg.attr("width", w).attr("height", h);
 
           var sim = d3.forceSimulation(nodes)
+            .alphaDecay(0.06)
             .force("link", d3.forceLink(links).id(d => d.id).distance(80).strength(0.4))
             .force("charge", d3.forceManyBody().strength(-180))
             .force("center", d3.forceCenter(w/2, h/2))
@@ -1438,22 +1473,23 @@ struct MemoryGraphWebView: NSViewRepresentable {
 
           var link = svg.append("g").selectAll("line")
             .data(links).join("line")
-            .attr("stroke", "rgba(255,255,255,0.12)")
-            .attr("stroke-width", 1);
+            .attr("stroke", "#00D4FF")
+            .attr("stroke-opacity", 0.45)
+            .attr("stroke-width", 1.5);
 
           var node = svg.append("g").selectAll("g")
             .data(nodes).join("g")
             .call(d3.drag()
-              .on("start", (e,d) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; })
+              .on("start", (e,d) => { d.fx=d.x; d.fy=d.y; })
               .on("drag",  (e,d) => { d.fx=e.x; d.fy=e.y; })
-              .on("end",   (e,d) => { if (!e.active) sim.alphaTarget(0); d.fx=null; d.fy=null; })
+              .on("end",   () => { /* keep node pinned — no sim restart */ })
             );
 
           node.append("circle")
             .attr("r", d => 10 + Math.min(d.importance * 12, 10))
-            .attr("fill", d => colorFor(d.source))
-            .attr("fill-opacity", 0.85)
-            .attr("stroke", "rgba(255,255,255,0.25)")
+            .attr("fill", "#FFFFFF")
+            .attr("fill-opacity", 0.92)
+            .attr("stroke", "#00D4FF")
             .attr("stroke-width", 1.5);
 
           node.append("text")

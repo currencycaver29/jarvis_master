@@ -36,6 +36,7 @@ struct QuickPopupView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            contextChips
             ringSection
             if !backendManager.isAvailable {
                 Label("Offline — no API key connected", systemImage: "exclamationmark.triangle.fill")
@@ -50,7 +51,8 @@ struct QuickPopupView: View {
             statusLine
                 .padding(.horizontal, 20)
                 .padding(.top, 6)
-            Spacer(minLength: 10)
+            Spacer(minLength: 6)
+            quickActionButtons
             tipLine
         }
         .frame(minWidth: 360, maxWidth: .infinity)
@@ -234,6 +236,84 @@ struct QuickPopupView: View {
             .font(ShailTheme.captionFont)
             .foregroundColor(.white.opacity(0.25))
             .padding(.bottom, 14)
+    }
+
+    // MARK: - Context chips
+
+    private var contextChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                if let h = nativeHealth {
+                    chipView(label: "SCR", value: h.capture == "connected" ? "ON" : "OFF",
+                             active: h.capture == "connected")
+                    chipView(label: "ACC", value: h.accessibility == "connected" ? "ON" : "OFF",
+                             active: h.accessibility == "connected")
+                }
+                let sessionCount = ChatStore.shared.sessions.count
+                if sessionCount > 0 {
+                    chipView(label: "MEM", value: "\(sessionCount) session\(sessionCount == 1 ? "" : "s")",
+                             active: true)
+                }
+                if wsClient.isConnected {
+                    chipView(label: "WS", value: "live", active: true, color: .green)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+        }
+    }
+
+    private func chipView(label: String, value: String, active: Bool, color: Color = ShailTheme.primaryBlue) -> some View {
+        HStack(spacing: 4) {
+            Text(label)
+                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                .foregroundColor(.white.opacity(0.45))
+            Text(value)
+                .font(.system(size: 10, design: .rounded))
+                .foregroundColor(active ? color.opacity(0.9) : .white.opacity(0.3))
+        }
+        .padding(.horizontal, 7).padding(.vertical, 3)
+        .background(active ? color.opacity(0.12) : Color.white.opacity(0.04))
+        .overlay(RoundedRectangle(cornerRadius: 5).stroke(active ? color.opacity(0.3) : Color.white.opacity(0.08), lineWidth: 1))
+        .cornerRadius(5)
+    }
+
+    // MARK: - Quick action buttons
+
+    private var quickActionButtons: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                quickActionButton(icon: "arrow.up.right.circle", label: "Open Dashboard", color: .green) {
+                    coordinator.showBirdsEye()
+                }
+                quickActionButton(icon: "eye", label: "Summarize Screen") {
+                    let q = "Summarize what's currently on my screen"
+                    coordinator.messages.append(ChatMessage(text: q, role: .user))
+                    coordinator.pendingQuery = q
+                    coordinator.showChatExpanded()
+                }
+                quickActionButton(icon: "clock.arrow.circlepath", label: "History") {
+                    showHistory = true
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 8)
+        }
+    }
+
+    private func quickActionButton(icon: String, label: String, color: Color = ShailTheme.primaryBlue, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: icon).font(.system(size: 9, weight: .semibold))
+                Text(label).font(.system(size: 10, design: .rounded))
+            }
+            .foregroundColor(color)
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .background(color.opacity(0.1))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(color.opacity(0.25), lineWidth: 1))
+            .cornerRadius(7)
+        }
+        .buttonStyle(.plain)
     }
 
     private var swipeUpGesture: some Gesture {
