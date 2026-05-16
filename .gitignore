@@ -121,3 +121,6 @@ graph.json
 graph.html
 GRAPH_REPORT.md
 old_graphs/
+
+# Separate projects
+claude-code-minimax/
