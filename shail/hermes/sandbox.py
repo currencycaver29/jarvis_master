@@ -49,8 +49,8 @@ class ToolSandbox:
 
     def __init__(self, base_dir: Optional[str] = None):
         if base_dir is None:
-            # Use system temp or a dedicated SHAIL folder
-            base_dir = os.path.expanduser("~/Library/Application Support/SHAIL/sandbox")
+            # Use a workspace-relative path instead of system directory to avoid permission issues
+            base_dir = os.path.join(os.getcwd(), "run", "hermes_sandbox")
         
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
@@ -179,4 +179,11 @@ def get_sandbox() -> ToolSandbox:
     global _sandbox
     if _sandbox is None:
         _sandbox = ToolSandbox()
+    return _sandbox
+
+
+def reset_sandbox() -> ToolSandbox:
+    """Reset sandbox singleton (for testing)."""
+    global _sandbox
+    _sandbox = ToolSandbox()
     return _sandbox

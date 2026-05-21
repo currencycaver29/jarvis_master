@@ -1,0 +1,98 @@
+{
+  "skill_494daf4d": {
+    "skill_id": "skill_494daf4d",
+    "name": "Test Skill",
+    "prompt_template": "Test {task}",
+    "description": "A test skill for validation",
+    "success_rate": 1.0,
+    "execution_count": 0,
+    "tags": [
+      "test",
+      "unit"
+    ]
+  },
+  "skill_80ceaeae": {
+    "skill_id": "skill_80ceaeae",
+    "name": "Test Skill",
+    "prompt_template": "Test {task}",
+    "description": "A test skill for validation",
+    "success_rate": 1.0,
+    "execution_count": 0,
+    "tags": [
+      "test",
+      "unit"
+    ]
+  },
+  "skill_95532a5e": {
+    "skill_id": "skill_95532a5e",
+    "name": "Test Skill",
+    "prompt_template": "Test {task}",
+    "description": "A test skill for validation",
+    "success_rate": 1.0,
+    "execution_count": 0,
+    "tags": [
+      "test",
+      "unit"
+    ]
+  },
+  "skill_34a56632": {
+    "skill_id": "skill_34a56632",
+    "name": "Test Skill",
+    "prompt_template": "Test {task}",
+    "description": "A test skill for validation",
+    "success_rate": 1.0,
+    "execution_count": 0,
+    "tags": [
+      "test",
+      "unit"
+    ]
+  },
+  "skill_0a8d09ef": {
+    "skill_id": "skill_0a8d09ef",
+    "name": "Test Skill",
+    "prompt_template": "Test {task}",
+    "description": "A test skill for validation",
+    "success_rate": 1.0,
+    "execution_count": 0,
+    "tags": [
+      "test",
+      "unit"
+    ]
+  },
+  "skill_8e1be1a8": {
+    "skill_id": "skill_8e1be1a8",
+    "name": "Test Skill",
+    "prompt_template": "Test {task}",
+    "description": "A test skill for validation",
+    "success_rate": 1.0,
+    "execution_count": 0,
+    "tags": [
+      "test",
+      "unit"
+    ]
+  },
+  "skill_f82362cf": {
+    "skill_id": "skill_f82362cf",
+    "name": "Test Skill",
+    "prompt_template": "Test {task}",
+    "description": "A test skill for validation",
+    "success_rate": 1.0,
+    "execution_count": 0,
+    "tags": [
+      "test",
+      "unit"
+    ]
+  },
+  "skill_5c53ef1e": {
+    "skill_id": "skill_5c53ef1e",
+    "name": "Test Skill",
+    "prompt_template": "Test {task}",
+    "description": "A test skill for validation",
+    "success_rate": 1.0,
+    "execution_count": 0,
+    "tags": [
+      "test",
+      "unit"
+    ]
+  }
+}

@@ -7,9 +7,11 @@ from unittest.mock import MagicMock, patch
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-# PRE-IMPORT MOCKS
-patch('shail.memory.vector_store.get_vector_store', return_value=MagicMock()).start()
-patch('chromadb.PersistentClient', return_value=MagicMock()).start()
+from shail.hermes.integration import reset_hermes_sail_integration
+from shail.hermes.reflection import reset_reflection, get_reflection
+from shail.hermes.persistent_memory import PersistentMemory, reset_persistent_memory
+from shail.hermes.types import ExecutionTrace, ExecutionStatus, HermesSkill
+import uuid
 
 test_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "test_data"))
 os.makedirs(test_dir, exist_ok=True)
@@ -20,38 +22,38 @@ class MockSettings:
     rag_embedding_dim = 768
     rag_pg_dsn = ""
     ollama_base_url = "http://localhost:11434"
-
-patch('apps.shail.settings.get_settings', return_value=MockSettings()).start()
-
-from shail.hermes.sandbox import ToolSandbox
-mock_sb_obj = MagicMock(spec=ToolSandbox)
-mock_sb_obj.base_dir = os.path.join(test_dir, "sandbox")
-patch('shail.hermes.sandbox.get_sandbox', return_value=mock_sb_obj).start()
-patch('shail.hermes.sandbox._sandbox', mock_sb_obj).start()
-
-from shail.hermes.config import HermesConfig
-mock_config = HermesConfig()
-mock_config.sandbox_dir = os.path.join(test_dir, "sandbox")
-patch('shail.hermes.config.get_hermes_config', return_value=mock_config).start()
-
-from shail.hermes.reflection import get_reflection
-from shail.hermes.persistent_memory import PersistentMemory
-from shail.hermes.types import ExecutionTrace, ExecutionStatus, HermesSkill
-import uuid
+    ollama_embed_model = "mxbai-embed-large"
+    ollama_embed_dim = 768
 
 class TestHermesRecursive(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        # Override PersistentMemory to not use ChromaDB natively for this test
-        # We just want to test the reflection logic, not the actual embedding
+        # 1. Clean up singletons
+        reset_hermes_sail_integration()
+        
+        # 2. Patch dependencies
+        self.patchers = []
+        self.patchers.append(patch('shail.memory.vector_store.get_vector_store', return_value=MagicMock()))
+        self.patchers.append(patch('chromadb.PersistentClient', return_value=MagicMock()))
+        self.patchers.append(patch('apps.shail.settings.get_settings', return_value=MockSettings()))
+        self.patchers.append(patch('shail.hermes.persistent_memory.embed_texts', return_value=[[0.1]*768]))
+        self.patchers.append(patch('shail.hermes.persistent_memory.embed_query', return_value=[0.1]*768))
+        
+        for p in self.patchers:
+            p.start()
+
+        # 3. Create instances for testing
         self.memory = PersistentMemory(storage_dir=os.path.join(test_dir, "mem"))
         self.memory.trace_collection = MagicMock()
         self.memory.skill_collection = MagicMock()
         
-        # Patch the embedding functions to avoid network calls to Ollama
-        patch('shail.hermes.persistent_memory.embed_texts', return_value=[[0.1]*768]).start()
-        patch('shail.hermes.persistent_memory.embed_query', return_value=[0.1]*768).start()
-        
-        self.reflection = get_reflection(self.memory)
+        # Use reset_reflection to ensure we get a fresh instance with our test memory
+        self.reflection = reset_reflection(self.memory)
+
+    async def asyncTearDown(self):
+        for p in reversed(self.patchers):
+            p.stop()
+        patch.stopall()
+        reset_hermes_sail_integration()
 
     async def test_skill_refinement(self):
         """Verify that a failing trace refines its associated skill."""
@@ -91,10 +93,15 @@ class TestHermesRecursive(unittest.IsolatedAsyncioTestCase):
             execution_time_ms=100
         )
         
+        # Directly inject mock into the private field to bypass ensure_vector_store
+        mock_coll = MagicMock()
+        self.memory._trace_collection = mock_coll
+        self.memory._vector_store = MagicMock() # Ensure _ensure_vector_store skips
+        
         self.memory.store_trace(trace)
         
-        # Assert that upsert was called on the mock trace_collection
-        self.memory.trace_collection.upsert.assert_called_once()
+        # Assert that upsert was called on our specific mock
+        mock_coll.upsert.assert_called_once()
 
 if __name__ == "__main__":
     unittest.main()

@@ -73,3 +73,10 @@ def get_hermes_observability() -> HermesObservability:
     if _observability is None:
         _observability = HermesObservability()
     return _observability
+
+
+def reset_hermes_observability() -> HermesObservability:
+    """Reset observability singleton (for testing)."""
+    global _observability
+    _observability = HermesObservability()
+    return _observability

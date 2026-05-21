@@ -49,21 +49,10 @@ class PersistentMemory:
         self._traces: Dict[str, ExecutionTrace] = {}
         self._lock = asyncio.Lock()
 
-        # Vector Store initialization
-        settings = get_settings()
-        self.vector_store = get_vector_store(
-            store_type=settings.rag_vector_store,
-            dsn=settings.rag_pg_dsn,
-            chroma_path=settings.rag_chroma_path,
-            dim=settings.rag_embedding_dim
-        )
-        # Use a dedicated collection for Hermes skills
-        if hasattr(self.vector_store, "get_collection"):
-            self.skill_collection = self.vector_store.get_collection("hermes_skills")
-            self.trace_collection = self.vector_store.get_collection("hermes_traces")
-        else:
-            self.skill_collection = self.vector_store
-            self.trace_collection = self.vector_store
+        # Vector Store components (lazily initialized)
+        self._vector_store = None
+        self._skill_collection = None
+        self._trace_collection = None
 
         # Create storage directory
         self.storage_dir.mkdir(parents=True, exist_ok=True)
@@ -71,6 +60,52 @@ class PersistentMemory:
         # Load existing data (synchronous for simplicity)
         self._load_skills_sync()
         self._load_traces_sync()
+
+    def _ensure_vector_store(self):
+        """Ensure vector store and collections are initialized."""
+        if self._vector_store is not None:
+            return
+
+        try:
+            settings = get_settings()
+            self._vector_store = get_vector_store(
+                store_type=settings.rag_vector_store,
+                dsn=settings.rag_pg_dsn,
+                chroma_path=settings.rag_chroma_path,
+                dim=settings.rag_embedding_dim
+            )
+            # Use a dedicated collection for Hermes skills
+            if hasattr(self._vector_store, "get_collection"):
+                self._skill_collection = self._vector_store.get_collection("hermes_skills")
+                self._trace_collection = self._vector_store.get_collection("hermes_traces")
+            else:
+                self._skill_collection = self._vector_store
+                self._trace_collection = self._vector_store
+        except Exception as e:
+            logger.warning(f"Failed to initialize vector store: {e}")
+
+    @property
+    def vector_store(self):
+        self._ensure_vector_store()
+        return self._vector_store
+
+    @property
+    def skill_collection(self):
+        self._ensure_vector_store()
+        return self._skill_collection
+
+    @skill_collection.setter
+    def skill_collection(self, value):
+        self._skill_collection = value
+
+    @property
+    def trace_collection(self):
+        self._ensure_vector_store()
+        return self._trace_collection
+
+    @trace_collection.setter
+    def trace_collection(self, value):
+        self._trace_collection = value
 
     async def _load_all(self):
         """Load all data from disk."""
@@ -379,4 +414,11 @@ def get_persistent_memory() -> PersistentMemory:
     global _persistent_memory
     if _persistent_memory is None:
         _persistent_memory = PersistentMemory()
+    return _persistent_memory
+
+
+def reset_persistent_memory() -> PersistentMemory:
+    """Reset persistent memory singleton (for testing)."""
+    global _persistent_memory
+    _persistent_memory = PersistentMemory()
     return _persistent_memory

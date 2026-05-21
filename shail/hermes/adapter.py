@@ -336,9 +336,15 @@ def get_hermes_adapter() -> HermesAdapter:
 def reset_hermes_adapter() -> HermesAdapter:
     """Reset Hermes adapter (for testing)."""
     global _hermes_adapter
-    from shail.hermes.skill_memory import reset_skill_memory
-    from shail.hermes.reflection import get_reflection
+    from shail.hermes.persistent_memory import reset_persistent_memory
+    from shail.hermes.reflection import reset_reflection
+    from shail.hermes.sandbox import reset_sandbox
+    from shail.hermes.observability import reset_hermes_observability
 
-    reset_skill_memory()
+    pm = reset_persistent_memory()
+    reset_reflection(pm)
+    reset_sandbox()
+    reset_hermes_observability()
+
     _hermes_adapter = HermesAdapter()
     return _hermes_adapter

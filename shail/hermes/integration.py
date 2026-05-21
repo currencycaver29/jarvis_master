@@ -195,6 +195,19 @@ def get_hermes_sail_integration() -> HermesSHAILIntegration:
     return _hermes_sail_integration
 
 
+def reset_hermes_sail_integration() -> HermesSHAILIntegration:
+    """Reset Hermes-SHAIL integration singleton (for testing)."""
+    global _hermes_sail_integration
+    from shail.hermes.adapter import reset_hermes_adapter
+    from shail.hermes.subagent_runtime import reset_subagent_runtime
+    
+    reset_hermes_adapter()
+    reset_subagent_runtime()
+    
+    _hermes_sail_integration = HermesSHAILIntegration()
+    return _hermes_sail_integration
+
+
 # ===== Helper Functions =====
 
 async def execute_with_hermes_retry(task: str, context: Dict = None) -> Dict:

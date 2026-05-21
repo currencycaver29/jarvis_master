@@ -219,3 +219,12 @@ def get_reflection(skill_memory: Optional[SkillMemory] = None) -> Reflection:
         memory = skill_memory or get_skill_memory()
         _reflection = Reflection(memory)
     return _reflection
+
+
+def reset_reflection(skill_memory: Optional[SkillMemory] = None) -> Reflection:
+    """Reset reflection singleton (for testing)."""
+    global _reflection
+    from shail.hermes.skill_memory import get_skill_memory
+    memory = skill_memory or get_skill_memory()
+    _reflection = Reflection(memory)
+    return _reflection
