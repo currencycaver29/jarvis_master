@@ -40,6 +40,19 @@ class HermesConfig(BaseModel):
         default=True,
         description="Enable reflection"
     )
+    # Sandbox settings
+    sandbox_enabled: bool = Field(
+        default=True,
+        description="Enable tool sandboxing"
+    )
+    default_timeout_sec: float = Field(
+        default=60.0,
+        description="Default timeout for tool execution"
+    )
+    sandbox_dir: str = Field(
+        default="~/Library/Application Support/SHAIL/sandbox",
+        description="Directory for sandbox environments"
+    )
 
 
 # Global config instance

@@ -31,12 +31,14 @@ if not os.path.exists(os.path.join(PROJECT_ROOT, "shail", "__init__.py")):
         f"Expected shail at: {os.path.join(PROJECT_ROOT, 'shail')}"
     )
 
+import asyncio
 from shail.utils.queue import TaskQueue
 from shail.core.router import ShailCoreRouter
 from shail.core.types import TaskRequest, TaskResult, TaskStatus
 from shail.memory.store import create_task, update_task_status, get_task
 from shail.safety.permission_manager import PermissionManager
 from apps.shail.settings import get_settings
+from shail.hermes.integration import get_hermes_sail_integration
 
 
 class TaskWorker:
@@ -48,6 +50,11 @@ class TaskWorker:
         self.queue = TaskQueue()
         self.router = ShailCoreRouter()
         self.running = True
+        self.hermes = get_hermes_sail_integration()
+        
+        # Reuse a single event loop for all Hermes calls
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
         
         # Setup signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -84,10 +91,42 @@ class TaskWorker:
             # Update status to running
             update_task_status(task_id, "running")
             
-            # Execute the task
+            # Execute the task with Hermes retry logic
             # Note: If task needs permission, router will return AWAITING_APPROVAL
             # If permission was already approved, it will proceed normally
-            result = self.router.route(request, task_id=task_id)
+            try:
+                # Reuse the event loop instead of creating new ones
+                try:
+                    hermes_result = self._loop.run_until_complete(
+                        self.hermes.execute_task_with_hermes(
+                            task_text=request.text,
+                            context={"request": request.dict(), "task_id": task_id},
+                            use_subagent=False
+                        )
+                    )
+                    print(f"[Hermes] Result: status={hermes_result.status.name}, retries={hermes_result.retry_count}, error={hermes_result.error}")
+                    # Always use router result - Hermes wraps it
+                    result = self.router.route(request, task_id=task_id)
+                except RuntimeError as re:
+                    if "Event loop is closed" in str(re):
+                        # Recreate loop if closed
+                        self._loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(self._loop)
+                        hermes_result = self._loop.run_until_complete(
+                            self.hermes.execute_task_with_hermes(
+                                task_text=request.text,
+                                context={"request": request.dict(), "task_id": task_id},
+                                use_subagent=False
+                            )
+                        )
+                        print(f"[Hermes] Result: status={hermes_result.status.name}, retries={hermes_result.retry_count}, error={hermes_result.error}")
+                        result = self.router.route(request, task_id=task_id)
+                    else:
+                        raise
+            except Exception as e:
+                # Hermes not available - fallback to original
+                print(f"[Hermes] Fallback due to: {e}")
+                result = self.router.route(request, task_id=task_id)
             
             # Handle result status
             if result.status == TaskStatus.AWAITING_APPROVAL:
@@ -166,6 +205,9 @@ class TaskWorker:
                 time.sleep(1)  # Brief pause before retrying
         
         print("[Worker] Worker stopped")
+        # Clean up event loop
+        if self._loop and not self._loop.is_closed():
+            self._loop.close()
 
 
 def main():

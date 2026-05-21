@@ -48,33 +48,60 @@ class Reflection:
             "trace_id": trace.trace_id,
             "status": trace.status.value,
             "skill_generated": False,
+            "skill_refined": False,
+            "tool_discovered": False,
             "error_analyzed": False,
             "insights": [],
         }
 
-        # Store trace for later analysis
+        # Store trace for later analysis (this now also ingests to VectorStore if successful)
         self.skill_memory.store_trace(trace)
+
+        # Autonomous Tool Discovery Check
+        if trace.status == ExecutionStatus.COMPLETED and "sandbox" in str(trace.result).lower():
+            result["tool_discovered"] = True
+            result["insights"].append("Potential new tool discovered from sandbox execution")
+            logger.info(f"Reflection: Potential new tool discovered from trace {trace.trace_id}")
 
         if trace.status == ExecutionStatus.COMPLETED:
             result["insights"].append("Task completed successfully")
 
             # Check if we should generate a skill
-            if trace.execution_time_ms > 2000:
+            if trace.execution_time_ms > 2000 and not getattr(trace, 'skill_used', None):
                 skill = self.skill_memory.generate_skill_from_trace(trace)
                 if skill:
                     self.skill_memory.store_skill(skill)
                     result["skill_generated"] = True
                     result["insights"].append(f"Generated skill: {skill.skill_id}")
                     logger.info(f"Reflection: Generated skill from trace {trace.trace_id}")
+            elif getattr(trace, 'skill_used', None):
+                result["insights"].append(f"Successfully used skill: {trace.skill_used}")
 
         elif trace.status == ExecutionStatus.FAILED:
             result["insights"].append(f"Task failed: {trace.error}")
             result["error_analyzed"] = True
 
+            # Autonomous Skill Refinement
+            skill_used = getattr(trace, 'skill_used', None)
+            if skill_used:
+                skill = self.skill_memory.get_skill(skill_used)
+                if skill:
+                    self._refine_skill(skill, trace)
+                    result["skill_refined"] = True
+                    result["insights"].append(f"Refined failing skill: {skill.skill_id}")
+                    logger.info(f"Reflection: Refined skill {skill.skill_id} due to failure")
+
             # Analyze error for patterns (MVP - just log)
             self._analyze_error(trace)
 
         return result
+
+    def _refine_skill(self, skill: HermesSkill, trace: ExecutionTrace) -> None:
+        """Modify an existing skill based on failure feedback."""
+        # Simple refinement logic: Append warning to prompt template
+        if "AVOID PREVIOUS ERROR:" not in skill.prompt_template:
+            skill.prompt_template += f"\n\nAVOID PREVIOUS ERROR: {trace.error}"
+            self.skill_memory.store_skill(skill)
 
     def _analyze_error(self, trace: ExecutionTrace) -> None:
         """Analyze error patterns (MVP - basic logging)."""

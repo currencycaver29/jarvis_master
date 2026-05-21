@@ -1,0 +1,11 @@
+{
+  "skill_6bc92670": {
+    "skill_id": "skill_6bc92670",
+    "name": "Test Skill",
+    "prompt_template": "Original Template\n\nAVOID PREVIOUS ERROR: API Rate Limit Exceeded",
+    "description": "Test",
+    "success_rate": 1.0,
+    "execution_count": 0,
+    "tags": []
+  }
+}

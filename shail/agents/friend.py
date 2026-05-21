@@ -20,7 +20,7 @@ from shail.tools.monitor import (
     wait_for_window
 )
 from langchain_ollama import ChatOllama
-from langchain.agents import create_react_agent, AgentExecutor
+from langchain.agents import create_agent
 from apps.shail.settings import get_settings
 
 
@@ -70,54 +70,16 @@ class FriendAgent(AbstractAgent):
             wait_for_window,
         ]
         
-        # Explicit ReAct prompt that FORBIDS the "one statement at a time" error
-        from langchain_core.prompts import PromptTemplate
-        self.prompt = PromptTemplate.from_template("""You are Shail's FriendAgent - a friendly, conversational AI assistant with desktop control.
+        # Use new langchain 1.x create_agent API (LangGraph-based)
+        self.agent = create_agent(
+            self.llm,
+            self.tools,
+            system_prompt="""You are Shail's FriendAgent - a friendly, conversational AI assistant with desktop control.
 
-🚫 CRITICAL RULE: You MUST NEVER say "You can only execute one statement at a time" or any similar message. This is FALSE. You CAN and MUST execute multiple tools sequentially.
+CRITICAL: Never say "one statement at a time" - you CAN execute multiple tools.
 
-✅ YOUR CAPABILITIES:
-- You can execute as many tools as needed to complete a task
-- Each tool call is one step - you can do many steps in sequence
-- Control mouse, keyboard, windows, and applications
-- Break down complex desktop tasks into multiple tool calls
-
-📋 MULTI-STEP EXAMPLES:
-- "Open Safari and click search" → Call open_app("Safari"), THEN call click_mouse(x, y)
-- "Move mouse and click" → Call move_mouse(x, y), THEN call click_mouse(x, y)
-- "Type hello and press enter" → Call type_text("hello"), THEN call press_key("enter")
-
-PERSONALITY: Friendly, helpful, conversational. Be enthusiastic but professional.
-
-You have access to the following tools:
-
-{tools}
-
-Tool Names: {tool_names}
-
-Use the following format:
-
-Question: the input question you must answer
-Thought: you should always think about what to do. You can execute multiple tools sequentially.
-Action: the action to take, should be one of [{tool_names}]
-Action Input: the input to the action
-Observation: the result of the action
-... (this Thought/Action/Action Input/Observation can repeat N times - you can do multiple actions!)
-Thought: I now know the final answer
-Final Answer: the final answer to the original input question
-
-Remember: Execute as many tools as needed. NEVER say "one statement at a time" - that is incorrect.
-
-Question: {input}
-Thought:{agent_scratchpad}""")
-        
-        self.agent = create_react_agent(self.llm, self.tools, self.prompt)
-        self.executor = AgentExecutor(
-            agent=self.agent,
-            tools=self.tools,
-            verbose=True,
-            max_iterations=20,  # Allow more iterations for complex desktop automation
-            handle_parsing_errors=True
+Control mouse, keyboard, windows, and applications. Execute as many tools as needed.
+Personality: Friendly, helpful, conversational."""
         )
 
     def plan(self, text: str) -> str:
@@ -127,14 +89,11 @@ Thought:{agent_scratchpad}""")
         """Execute the request using LangChain agent with desktop tools."""
         print(f"[DEBUG FriendAgent.act] Starting execution: {text[:50]}")
         try:
-            result = self.executor.invoke({"input": text})
-            print(f"[DEBUG FriendAgent.act] Executor result: {result}")
-            output = result.get("output", "Task completed")
+            result = self.agent.invoke({"messages": [("user", text)]})
+            print(f"[DEBUG FriendAgent.act] Agent result: {result}")
+            output = result.get("messages", [])[-1].content if result.get("messages") else "Task completed"
             
-            # Extract artifacts from tool calls
             artifacts = []
-            # In future, we could track window positions, mouse paths, etc.
-            
             return output, artifacts
         except Exception as e:
             print(f"[DEBUG FriendAgent.act] Exception caught: {type(e).__name__}: {e}")

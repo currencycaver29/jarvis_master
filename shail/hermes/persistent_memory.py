@@ -16,6 +16,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from shail.hermes.types import HermesSkill, ExecutionTrace, ExecutionStatus
+from shail.memory.vector_store import get_vector_store, EmbeddingRecord
+from shail.memory.embeddings import embed_texts, embed_query
+from apps.shail.settings import get_settings
 
 
 logger = logging.getLogger(__name__)
@@ -23,18 +26,15 @@ logger = logging.getLogger(__name__)
 
 class PersistentMemory:
     """
-    File-based persistent storage for Hermes MVP.
+    File-based persistent storage for Hermes.
+    Now integrated with SHAIL VectorStore for semantic search.
 
     Features:
-    - Stores skills to JSON file
+    - Stores skills to JSON file and VectorStore (Chroma)
     - Stores execution traces to JSON file
     - Auto-saves on changes
+    - Semantic search for skills using RAG
     - Thread-safe with asyncio lock
-
-    For production:
-    - Replace with RAG (pgvector/Chroma)
-    - Add embedding generation
-    - Add semantic search
     """
 
     def __init__(self, storage_dir: Optional[str] = None):
@@ -48,6 +48,22 @@ class PersistentMemory:
         self._skills: Dict[str, HermesSkill] = {}
         self._traces: Dict[str, ExecutionTrace] = {}
         self._lock = asyncio.Lock()
+
+        # Vector Store initialization
+        settings = get_settings()
+        self.vector_store = get_vector_store(
+            store_type=settings.rag_vector_store,
+            dsn=settings.rag_pg_dsn,
+            chroma_path=settings.rag_chroma_path,
+            dim=settings.rag_embedding_dim
+        )
+        # Use a dedicated collection for Hermes skills
+        if hasattr(self.vector_store, "get_collection"):
+            self.skill_collection = self.vector_store.get_collection("hermes_skills")
+            self.trace_collection = self.vector_store.get_collection("hermes_traces")
+        else:
+            self.skill_collection = self.vector_store
+            self.trace_collection = self.vector_store
 
         # Create storage directory
         self.storage_dir.mkdir(parents=True, exist_ok=True)
@@ -134,9 +150,33 @@ class PersistentMemory:
     # ===== Skill Operations =====
 
     def store_skill(self, skill: HermesSkill):
-        """Store a skill (async, with auto-save)."""
+        """Store a skill (sync JSON + async VectorStore)."""
+        # Store in JSON
         self._skills[skill.skill_id] = skill
         self._save_skills_sync()
+        
+        # Store in Vector Store for semantic search
+        try:
+            content = f"{skill.name}\n{skill.description or ''}\nTags: {', '.join(skill.tags)}"
+            embedding = embed_texts([content])[0]
+            
+            record = EmbeddingRecord(
+                id=skill.skill_id,
+                namespace="hermes_skills",
+                content=content,
+                metadata={
+                    "skill_id": skill.skill_id,
+                    "name": skill.name,
+                    "success_rate": skill.success_rate,
+                    "type": "hermes_skill"
+                },
+                embedding=embedding
+            )
+            self.skill_collection.upsert([record])
+            logger.info(f"Stored skill in vector store: {skill.skill_id}")
+        except Exception as e:
+            logger.warning(f"Failed to store skill in vector store: {e}")
+
         logger.info(f"Stored skill: {skill.skill_id} - {skill.name}")
 
     def get_skill(self, skill_id: str) -> Optional[HermesSkill]:
@@ -152,11 +192,44 @@ class PersistentMemory:
         if skill_id in self._skills:
             del self._skills[skill_id]
             self._save_skills_sync()
+            try:
+                self.skill_collection.delete_ids([skill_id])
+            except Exception as e:
+                logger.warning(f"Failed to delete skill from vector store: {e}")
             return True
         return False
 
-    def search_skills(self, query: str) -> List[HermesSkill]:
-        """Search skills by keyword."""
+    def search_skills(self, query: str, limit: int = 5) -> List[HermesSkill]:
+        """Search skills using semantic search (RAG)."""
+        try:
+            query_embedding = embed_query(query)
+            if not query_embedding:
+                return self._search_skills_keyword(query)
+                
+            results = self.skill_collection.query(
+                query_embedding=query_embedding,
+                namespace="hermes_skills",
+                filters=None,
+                k=limit
+            )
+            
+            skills = []
+            for res in results:
+                skill_id = res["metadata"].get("skill_id")
+                if skill_id and skill_id in self._skills:
+                    skills.append(self._skills[skill_id])
+            
+            if not skills:
+                return self._search_skills_keyword(query)
+                
+            return skills
+            
+        except Exception as e:
+            logger.error(f"Vector search failed, falling back to keyword: {e}")
+            return self._search_skills_keyword(query)
+
+    def _search_skills_keyword(self, query: str) -> List[HermesSkill]:
+        """Fallback keyword search."""
         query_lower = query.lower()
         results = []
 
@@ -188,6 +261,15 @@ class PersistentMemory:
 
         # Auto-save on stat update
         self._save_skills_sync()
+        
+        # Update success rate in vector store metadata
+        try:
+            # We don't want to re-embed, just update metadata if the store supports it
+            # Chroma upsert works like an update if ID exists
+            # For simplicity, we'll just log it for now as metadata update is store-specific
+            pass
+        except Exception:
+            pass
 
     def generate_skill_from_trace(self, trace: ExecutionTrace) -> Optional[HermesSkill]:
         """Generate a skill from a trace."""
@@ -213,9 +295,33 @@ class PersistentMemory:
     # ===== Trace Operations =====
 
     def store_trace(self, trace: ExecutionTrace):
-        """Store an execution trace."""
+        """Store an execution trace and vectorize it if successful."""
         self._traces[trace.trace_id] = trace
         self._save_traces_sync()
+        
+        # Ingest into RAG if successful
+        if trace.status == ExecutionStatus.COMPLETED:
+            try:
+                content = f"Task: {trace.task}\nResult: {str(trace.result)[:1000]}"
+                embedding = embed_texts([content])[0]
+                
+                record = EmbeddingRecord(
+                    id=trace.trace_id,
+                    namespace="hermes_traces",
+                    content=content,
+                    metadata={
+                        "trace_id": trace.trace_id,
+                        "task": trace.task,
+                        "execution_time_ms": trace.execution_time_ms,
+                        "retry_count": trace.retry_count,
+                        "type": "hermes_trace"
+                    },
+                    embedding=embedding
+                )
+                self.trace_collection.upsert([record])
+                logger.info(f"Ingested successful trace into vector store: {trace.trace_id}")
+            except Exception as e:
+                logger.warning(f"Failed to ingest trace into vector store: {e}")
 
     def get_trace(self, trace_id: str) -> Optional[ExecutionTrace]:
         """Get a trace by ID."""

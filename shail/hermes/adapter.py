@@ -22,8 +22,11 @@ from shail.hermes.types import (
 
 from shail.hermes.config import HermesConfig, get_hermes_config
 from shail.hermes.model_client import ModelClient, get_model_client
-from shail.hermes.skill_memory import SkillMemory, get_skill_memory
+from shail.hermes.multi_model import get_multi_model_runtime
+from shail.hermes.persistent_memory import PersistentMemory, get_persistent_memory
 from shail.hermes.reflection import Reflection, get_reflection
+from shail.hermes.sandbox import ToolSandbox, get_sandbox
+from shail.hermes.observability import get_hermes_observability
 
 
 logger = logging.getLogger(__name__)
@@ -38,13 +41,65 @@ class HermesAdapter:
     - Autonomous retries with exponential backoff
     - Reflection after execution
     - Checkpoint support
+    - Persistent, vectorized skill memory
+    - Multi-model fallback (Ollama -> Claude)
+    - Sandboxed tool execution
+    - Real-time event observability
     """
 
     def __init__(self, config: Optional[HermesConfig] = None):
         self.config = config or get_hermes_config()
-        self.model_client: ModelClient = get_model_client("ollama")
-        self.skill_memory: SkillMemory = get_skill_memory()
+        # Use multi-model runtime for fallback capabilities
+        self.model_client = get_multi_model_runtime()
+        # Use PersistentMemory for vector storage and persistence
+        self.skill_memory: PersistentMemory = get_persistent_memory()
         self.reflection: Reflection = get_reflection(self.skill_memory)
+        # Sandbox for tool execution
+        self.sandbox: ToolSandbox = get_sandbox()
+        # Observability for event streaming
+        self.observability = get_hermes_observability()
+
+    async def run_in_sandbox(
+        self,
+        command: str,
+        use_python: bool = False,
+        timeout: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """
+        Execute a command or script in the isolated sandbox.
+        """
+        timeout = timeout or self.config.default_timeout_sec
+        
+        await self.observability.emit_event("sandbox_start", {"command": command[:200], "use_python": use_python})
+        
+        if use_python:
+            result = await self.sandbox.run_python_script(command, timeout=timeout)
+        else:
+            result = await self.sandbox.run_command(command, timeout=timeout)
+            
+        await self.observability.emit_event("sandbox_end", {
+            "success": result.success,
+            "timed_out": result.timed_out,
+            "execution_time_ms": result.execution_time_ms
+        })
+
+        # ── Permission Recovery Hook ──
+        if not result.success and "Permission denied" in result.stderr:
+            logger.warning("Permission denied detected in sandbox. Suggesting recovery.")
+            await self.observability.emit_event("recovery_suggested", {
+                "type": "permission",
+                "message": "Permission denied. Try running 'bash setup_permissions.sh' to fix OS permissions.",
+                "command": command
+            })
+            
+        return {
+            "success": result.success,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "returncode": result.returncode,
+            "execution_time_ms": result.execution_time_ms,
+            "timed_out": result.timed_out
+        }
 
     async def execute(
         self,
@@ -66,6 +121,8 @@ class HermesAdapter:
         request_id = str(uuid.uuid4())
         context = context or {}
 
+        await self.observability.emit_event("task_start", {"task": task[:200], "request_id": request_id})
+
         logger.info(f"Hermes executing task: {task[:50]}...")
 
         # Find applicable skill
@@ -74,16 +131,25 @@ class HermesAdapter:
 
         if skill:
             logger.info(f"Using skill: {skill.name}")
+            await self.observability.emit_event("skill_applied", {"skill_id": skill.skill_id, "name": skill.name})
 
         # Execute with or without retry
         if enable_retry:
-            return await self._execute_with_retry(
+            result = await self._execute_with_retry(
                 request_id, task, context, skill
             )
         else:
-            return await self._execute_once(
+            result = await self._execute_once(
                 request_id, task, context, skill
             )
+            
+        await self.observability.emit_event("task_end", {
+            "request_id": request_id,
+            "status": result.status.value,
+            "success": result.status == ExecutionStatus.COMPLETED
+        })
+        
+        return result
 
     async def _execute_with_retry(
         self,
@@ -99,6 +165,14 @@ class HermesAdapter:
 
         while retry_count <= policy.max_retries:
             try:
+                if retry_count > 0:
+                    await self.observability.emit_event("retry_attempt", {
+                        "request_id": request_id,
+                        "attempt": retry_count,
+                        "max_retries": policy.max_retries,
+                        "last_error": last_error
+                    })
+
                 result = await self._execute_once(
                     request_id, task, context, skill
                 )
@@ -179,6 +253,7 @@ class HermesAdapter:
                 status=ExecutionStatus.COMPLETED,
                 execution_time_ms=execution_time,
                 result=response,
+                skill_used=skill.skill_id if skill else None,
             )
 
             # Run reflection
@@ -203,6 +278,7 @@ class HermesAdapter:
                 status=ExecutionStatus.FAILED,
                 error=str(e),
                 execution_time_ms=execution_time,
+                skill_used=skill.skill_id if skill else None,
             )
 
             # Run reflection

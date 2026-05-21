@@ -73,6 +73,7 @@ class ExecutionTrace(BaseModel):
     execution_time_ms: float = Field(default=0, description="Execution time in ms")
     result: Optional[Any] = Field(default=None, description="Execution result")
     retry_count: int = Field(default=0, description="Retries used")
+    skill_used: Optional[str] = Field(default=None, description="Skill ID used, if any")
 
 
 # Retry Policy

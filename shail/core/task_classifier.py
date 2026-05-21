@@ -43,11 +43,9 @@ RULES: list[tuple[tuple[str, ...], AgentSlot]] = [
 ]
 
 # Model registry — swap models here without touching routing logic
-# Sprint 6: chat + code use lightweight gemma3:4b-it-q4_K_M (~2.6 GB).
-# Vision lazy-loads llava:7b only when Ghost Cursor invoked.
 MODELS: dict[str, str] = {
-    "gemma":  "gemma3:4b-it-q4_K_M",
-    "code":   "gemma3:4b-it-q4_K_M",
+    "gemma":  "llama3.2",
+    "code":   "llama3.2",
     "vision": "llava:7b",
 }
 

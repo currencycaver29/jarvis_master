@@ -1,0 +1,22 @@
+{
+  "aa25ee36-4a7b-48f9-bd1b-12d6d860abc7": {
+    "trace_id": "aa25ee36-4a7b-48f9-bd1b-12d6d860abc7",
+    "task": "do something impossible",
+    "status": "failed",
+    "error": "API Rate Limit Exceeded",
+    "execution_time_ms": 0.0,
+    "result": null,
+    "retry_count": 0,
+    "skill_used": "skill_6bc92670"
+  },
+  "69d27c7a-4b24-4b32-b7e2-f7fe88e92b5c": {
+    "trace_id": "69d27c7a-4b24-4b32-b7e2-f7fe88e92b5c",
+    "task": "do something possible",
+    "status": "completed",
+    "error": null,
+    "execution_time_ms": 100.0,
+    "result": "Success!",
+    "retry_count": 0,
+    "skill_used": null
+  }
+}
