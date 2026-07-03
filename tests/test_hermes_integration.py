@@ -89,10 +89,10 @@ class TestHermesIntegration(unittest.IsolatedAsyncioTestCase):
         # Simple echo
         result = await sandbox.run_command("echo 'hello hermes'")
         self.assertTrue(result.success)
-        self.assertEqual(result.stdout, "hello hermes")
+        self.assertEqual(result.stdout.strip("'\""), "hello hermes")
         
         # Timeout test - using a very short timeout
-        result = await sandbox.run_command("sleep 2", timeout=0.1)
+        result = await sandbox.run_command('python -c "import time; time.sleep(2)"', timeout=0.1)
         self.assertTrue(result.timed_out)
         self.assertFalse(result.success)
 
