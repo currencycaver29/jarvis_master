@@ -48,6 +48,11 @@ class PermissionRequest(BaseModel):
     tool_args: Dict[str, Any] = Field(..., description="Arguments that will be passed to the tool")
     rationale: str = Field(..., description="Human-readable explanation of why this tool is being called")
     timestamp: datetime = Field(default_factory=datetime.utcnow, description="When the request was created")
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
 
 
 class TaskResult(BaseModel):
@@ -81,6 +86,11 @@ class ChatResponse(BaseModel):
     text: str = Field(..., description="LLM response text")
     model: str = Field(..., description="Model used for generation")
     timestamp: Optional[datetime] = Field(default_factory=datetime.utcnow, description="Response timestamp")
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
 
 
 class NarrativeSegment(BaseModel):
