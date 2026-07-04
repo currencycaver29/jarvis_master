@@ -20,7 +20,7 @@ def test_buffer_add_and_prune():
     buf._frames = []
     # Use sync helper for test
     import asyncio
-    asyncio.get_event_loop().run_until_complete(buf.add_accessibility_event(ev))
+    asyncio.run(buf.add_accessibility_event(ev))
     result = buf.query_temporal_range(now - 1, now)
     assert len(result.events) == 1
 
@@ -38,7 +38,7 @@ def test_semantic_query_matches_error():
         metadata={},
     )
     import asyncio
-    asyncio.get_event_loop().run_until_complete(buf.add_accessibility_event(ev))
+    asyncio.run(buf.add_accessibility_event(ev))
     matches = buf.query_semantic("error")
     assert len(matches) >= 1
     assert "Traceback" in matches[0].story

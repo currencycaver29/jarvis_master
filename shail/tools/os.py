@@ -133,22 +133,59 @@ def run_command(command: str, working_dir: str = ".") -> str:
             rationale=f"Executing shell command: {command}"
         )
     
-    # Safe command - execute immediately
+    # Safe command - execute in sandbox
     try:
-        import os
         from shail.tools.files import BASE_DIR, _resolve_path
         wd = _resolve_path(working_dir) if working_dir != "." else BASE_DIR
-        result = subprocess.run(
-            command,
-            shell=True,
-            cwd=wd,
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-        if result.returncode == 0:
-            return result.stdout or "Command executed successfully"
-        return f"Command failed: {result.stderr or result.stdout}"
+        
+        # ── Hermes Integration: Use ToolSandbox ──
+        try:
+            from shail.hermes.integration import get_hermes_sail_integration
+            import asyncio
+            
+            hermes = get_hermes_sail_integration()
+            
+            # Bridge sync tool call to async sandbox
+            def _run_sandboxed():
+                return asyncio.run(hermes.adapter.run_in_sandbox(
+                    command=command,
+                    timeout=30.0
+                ))
+            
+            # If we're already in an event loop, this is tricky. 
+            # But LangGraph nodes run in threads usually.
+            try:
+                loop = asyncio.get_running_loop()
+                # Run in executor to avoid blocking loop
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    result = pool.submit(_run_sandboxed).result()
+            except RuntimeError:
+                result = _run_sandboxed()
+
+            if result["success"]:
+                return result["stdout"] or "Command executed successfully"
+            
+            if result["timed_out"]:
+                return "Command timed out after 30 seconds"
+                
+            return f"Command failed: {result['stderr'] or result['stdout']}"
+            
+        except Exception as hermes_exc:
+            logger.warning(f"Hermes sandbox failed, falling back to direct execution: {hermes_exc}")
+            # Fallback to direct subprocess if Hermes/Sandbox is not available
+            result = subprocess.run(
+                command,
+                shell=True,
+                cwd=wd,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode == 0:
+                return result.stdout or "Command executed successfully"
+            return f"Command failed: {result.stderr or result.stdout}"
+
     except subprocess.TimeoutExpired:
         return "Command timed out after 30 seconds"
     except Exception as e:

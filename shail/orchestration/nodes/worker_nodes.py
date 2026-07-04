@@ -59,8 +59,29 @@ class WorkerNodes:
         prior_notes = self._read_prior_notes(context_id)
         prompt = text if not prior_notes else f"{text}\n\n[Prior agent notes]\n{prior_notes}"
 
-        worker = self._select_worker(agent)
-        result = worker(prompt)
+        # ── Hermes Integration: Execute with retry and skill memory ──
+        try:
+            from shail.hermes.integration import get_hermes_sail_integration
+            hermes = get_hermes_sail_integration()
+            
+            logger.info(f"Delegating task to Hermes for agent: {agent}")
+            response = self._run_sync(hermes.execute_with_retry(
+                node_name=f"worker_{agent}",
+                task=prompt,
+                context=state
+            ))
+            
+            if response.status == "completed" or (hasattr(response.status, "value") and response.status.value == "completed"):
+                result = response.result.get("response") if isinstance(response.result, dict) else str(response.result)
+            else:
+                logger.warning(f"Hermes execution failed or incomplete: {response.error}")
+                # Fallback to direct worker if Hermes fails
+                worker = self._select_worker(agent)
+                result = worker(prompt)
+        except Exception as e:
+            logger.error(f"Failed to use Hermes, falling back to direct worker: {e}")
+            worker = self._select_worker(agent)
+            result = worker(prompt)
 
         # ── Sprint 2: persist response into shared context ──
         self._write_response(context_id, agent, result)

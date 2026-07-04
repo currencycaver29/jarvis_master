@@ -42,5 +42,5 @@ langgraph-checkpoint>=0.2.0
 # Desktop Control
 pynput>=1.7.6  # For mouse/keyboard control
 pyautogui>=0.9.54  # Alternative mouse/keyboard control
-pyobjc>=10.0  # macOS AppKit integration (for window management)
+pyobjc>=10.0; sys_platform == 'darwin'  # macOS AppKit integration (for window management)
 

@@ -236,7 +236,7 @@ def test_no_hardcoded_user_paths_in_runtime():
     for f in runtime_files:
         if not f.exists():
             continue
-        src = f.read_text()
+        src = f.read_text(encoding="utf-8")
         assert "/Users/reyhan/shail_master/.cursor" not in src, (
             f"{f} still contains hardcoded debug.log path"
         )
