@@ -127,7 +127,12 @@ class PerceptionServiceConnector:
             end_ts=end_ts,
             max_frames=max_frames,
         )
-        return asyncio.get_event_loop().run_until_complete(self.request_frames(req))
+        try:
+            loop = asyncio.get_event_loop_policy().get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        return loop.run_until_complete(self.request_frames(req))
 
     # ------------------------------
     # Internal helpers
