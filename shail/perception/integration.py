@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import time
 from datetime import datetime
@@ -11,6 +12,8 @@ from websockets.client import WebSocketClientProtocol
 
 from shail.core.types import AccessibilityEvent, FrameRequest, ThumbnailFrame
 from shail.perception.buffer import GroundingBuffer
+
+logger = logging.getLogger(__name__)
 
 
 class PerceptionServiceConnector:
@@ -143,23 +146,25 @@ class PerceptionServiceConnector:
         try:
             self._ax_ws = await websockets.connect(self.ax_uri)
             self._reconnect_delay = 1.0
-        except Exception:
-            await self._reconnect_with_backoff("ax")
+        except Exception as e:
+            logger.debug(f"Failed to connect to accessibility service: {e}")
+            self._ax_ws = None
 
     async def _connect_capture(self):
         try:
             self._capture_ws = await websockets.connect(self.capture_uri)
             self._reconnect_delay = 1.0
-        except Exception:
-            await self._reconnect_with_backoff("capture")
+        except Exception as e:
+            logger.debug(f"Failed to connect to capture service: {e}")
+            self._capture_ws = None
 
     async def _reconnect_with_backoff(self, service: str):
         await asyncio.sleep(self._reconnect_delay)
         self._reconnect_delay = min(self._reconnect_delay * 2, self._max_reconnect_delay)
         if service == "ax":
-            await self._connect_ax()
+            self._ax_ws = None
         else:
-            await self._connect_capture()
+            self._capture_ws = None
 
     def _parse_accessibility_event(self, data: dict) -> Optional[AccessibilityEvent]:
         if data.get("type") != "accessibility_event":
