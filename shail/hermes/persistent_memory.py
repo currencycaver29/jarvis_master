@@ -299,12 +299,24 @@ class PersistentMemory:
         
         # Update success rate in vector store metadata
         try:
-            # We don't want to re-embed, just update metadata if the store supports it
-            # Chroma upsert works like an update if ID exists
-            # For simplicity, we'll just log it for now as metadata update is store-specific
-            pass
-        except Exception:
-            pass
+            content = f"{skill.name}\n{skill.description or ''}\nTags: {', '.join(skill.tags)}"
+            embedding = embed_texts([content])[0]
+            record = EmbeddingRecord(
+                id=skill.skill_id,
+                namespace="hermes_skills",
+                content=content,
+                metadata={
+                    "skill_id": skill.skill_id,
+                    "name": skill.name,
+                    "success_rate": skill.success_rate,
+                    "type": "hermes_skill"
+                },
+                embedding=embedding
+            )
+            self.skill_collection.upsert([record])
+            logger.info(f"Updated skill success rate in vector store: {skill.skill_id} to {skill.success_rate}")
+        except Exception as e:
+            logger.warning(f"Failed to update skill success rate in vector store: {e}")
 
     def generate_skill_from_trace(self, trace: ExecutionTrace) -> Optional[HermesSkill]:
         """Generate a skill from a trace."""
