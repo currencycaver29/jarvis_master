@@ -23,34 +23,35 @@ from langchain.tools import tool
 sys.stdout.reconfigure(encoding='utf-8')
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-# App command map for macOS
-APP_MAPPINGS = {
-    "notepad": "TextEdit",
-    "calculator": "Calculator",
-    "chrome": "Google Chrome",
-    "vlc": "VLC",
-    "command prompt": "Terminal",
-    "control panel": "System Settings",
-    "settings": "System Settings",
-    "paint": "Preview", # Using Preview as a rough equivalent
-    "vs code": "Visual Studio Code",
-    "postman": "Postman"
-    # Add or change other apps as needed
-}
-# App command map
-APP_MAPPINGS = {
-    "notepad": "notepad",
-    "calculator": "calc",
-    "chrome": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-    "vlc": "C:\\Program Files\\VideoLAN\\VLC\\vlc.exe",
-    "command prompt": "cmd",
-    "control panel": "control",
-    "settings": "start ms-settings:",
-    "paint": "mspaint",
-    "vs code": "C:\\Users\\gaura\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe",
-    "postman": "C:\\Users\\gaura\\AppData\\Local\\Postman\\Postman.exe",
-    "Jio shpare browser": "C:\\Users\\Gaurav\\AppData\\Local\\JIO\\JioSphere\\Application\\JioSphere.exe"
-}
+# Setup cross-platform app command mapping
+if sys.platform == "darwin":
+    APP_MAPPINGS = {
+        "notepad": "TextEdit",
+        "calculator": "Calculator",
+        "chrome": "Google Chrome",
+        "vlc": "VLC",
+        "command prompt": "Terminal",
+        "control panel": "System Settings",
+        "settings": "System Settings",
+        "paint": "Preview",
+        "vs code": "Visual Studio Code",
+        "postman": "Postman"
+    }
+else:
+    user_profile = os.environ.get("USERPROFILE", os.path.expanduser("~"))
+    APP_MAPPINGS = {
+        "notepad": "notepad",
+        "calculator": "calc",
+        "chrome": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        "vlc": "C:\\Program Files\\VideoLAN\\VLC\\vlc.exe",
+        "command prompt": "cmd",
+        "control panel": "control",
+        "settings": "start ms-settings:",
+        "paint": "mspaint",
+        "vs code": os.path.join(user_profile, "AppData", "Local", "Programs", "Microsoft VS Code", "Code.exe"),
+        "postman": os.path.join(user_profile, "AppData", "Local", "Postman", "Postman.exe"),
+        "Jio shpare browser": os.path.join(user_profile, "AppData", "Local", "JIO", "JioSphere", "Application", "JioSphere.exe")
+    }
 
 # -------------------------
 # Global focus utility
@@ -74,12 +75,16 @@ async def focus_window(title_keyword: str) -> bool:
 # Index files/folders
 async def index_items(base_dirs):
     item_index = []
+    exclude_dirs = {".git", ".venv", "venv", "node_modules", "AppData", "Local Settings", "Microsoft", "System32"}
     for base_dir in base_dirs:
         for root, dirs, files in os.walk(base_dir):
+            # Modify dirs in-place to prevent os.walk from scanning excluded folders
+            dirs[:] = [d for d in dirs if d not in exclude_dirs and not d.startswith(".")]
             for d in dirs:
                 item_index.append({"name": d, "path": os.path.join(root, d), "type": "folder"})
             for f in files:
-                item_index.append({"name": f, "path": os.path.join(root, f), "type": "file"})
+                if not f.startswith("."):
+                    item_index.append({"name": f, "path": os.path.join(root, f), "type": "file"})
     logger.info(f"✅ Indexed {len(item_index)} items.")
     return item_index
 
@@ -154,7 +159,11 @@ async def open_app(app_title: str) -> str:
     app_title = app_title.lower().strip()
     app_command = APP_MAPPINGS.get(app_title, app_title)
     try:
-        await asyncio.create_subprocess_shell(f'start "" "{app_command}"', shell=True)
+        if sys.platform == "darwin":
+            await asyncio.create_subprocess_shell(f'open -a "{app_command}"', shell=True)
+        else:
+            await asyncio.create_subprocess_shell(f'start "" "{app_command}"', shell=True)
+            
         focused = await focus_window(app_title)
         if focused:
             return f"🚀 App launch हुआ और focus में है: {app_title}."
@@ -179,6 +188,14 @@ async def close_app(window_title: str) -> str:
 
 
     if not win32gui:
+        if sys.platform == "darwin":
+            # On macOS, close app via AppleScript
+            applescript = f'tell application "{window_title}" to quit'
+            try:
+                subprocess.call(['osascript', '-e', applescript])
+                return f"✅ Window बंद हो गई है।: {window_title}"
+            except Exception as e:
+                return f"❌ {window_title} बंद नहीं हो पाया: {e}"
         return "❌ win32gui"
 
     def enumHandler(hwnd, _):
@@ -187,7 +204,7 @@ async def close_app(window_title: str) -> str:
                 win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
 
     win32gui.EnumWindows(enumHandler, None)
-    return f"❌ Window बंद हो गई है।: {window_title}"
+    return f"✅ Window बंद हो गई है।: {window_title}"
 
 # Jarvis command logic
 @tool
@@ -206,7 +223,16 @@ async def folder_file(command: str) -> str:
     """
 
 
-    folders_to_index = ["D:/"]
+    # Fallback search dirs to avoid scanning large drives recursively
+    folders_to_index = []
+    if os.path.exists("D:/"):
+        folders_to_index.append("D:/")
+    else:
+        folders_to_index.append(os.getcwd())
+        desktop_dir = os.path.join(user_profile, "Desktop")
+        if os.path.exists(desktop_dir):
+            folders_to_index.append(desktop_dir)
+            
     index = await index_items(folders_to_index)
     command_lower = command.lower()
 

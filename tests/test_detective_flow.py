@@ -23,7 +23,7 @@ class TestDetectiveFlow(unittest.TestCase):
             mock_settings.return_value.gemini_api_key = "fake-key"
             
             # Setup Detective with mocked LLM
-            with patch('shail.agents.detective_agent.ChatGoogleGenerativeAI') as mock_llm_cls:
+            with patch('shail.agents.detective_agent.ChatOllama') as mock_llm_cls:
                 self.detective = AnomalyBiasedDetective()
                 self.mock_llm_detective = mock_llm_cls.return_value
     
@@ -46,7 +46,7 @@ class TestDetectiveFlow(unittest.TestCase):
         print("\n--- Testing Swaraj Loop Integration ---")
         
         # We need to mock MasterPlanner's internal dependencies heavily
-        with patch('shail.orchestration.master_planner.ChatGoogleGenerativeAI') as mock_mp_llm:
+        with patch('shail.orchestration.master_planner.ChatOllama') as mock_mp_llm:
             with patch('shail.perception.grounding_agent.GroundingAgent.find_event') as mock_grounding:
                  with patch('shail.agents.detective_agent.AnomalyBiasedDetective.investigate') as mock_investigate:
                     

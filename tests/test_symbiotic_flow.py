@@ -18,15 +18,53 @@ from shail.core.types import TaskRequest
 class TestSymbioticFlow(unittest.TestCase):
     
     def setUp(self):
-        # We need to mock the settings and LLM to avoid real API calls
-        with patch('apps.shail.settings.get_settings') as mock_settings:
-            mock_settings.return_value.gemini_model = "fake-model"
-            mock_settings.return_value.gemini_api_key = "fake-key"
-            
-            with patch('shail.orchestration.master_planner.ChatGoogleGenerativeAI') as mock_llm:
-                self.planner = MasterPlanner()
-                # Mock the LLM invoke to return something valid for the fallback route
-                mock_llm.return_value.invoke.return_value.content = '{"agent": "code", "confidence": 0.8, "rationale": "Fallback"}'
+        self.patchers = []
+        
+        # 1. Patch settings
+        p_settings = patch('apps.shail.settings.get_settings')
+        mock_settings = p_settings.start()
+        mock_settings.return_value.gemini_model = "fake-model"
+        mock_settings.return_value.gemini_api_key = "fake-key"
+        self.patchers.append(p_settings)
+        
+        # 2. Patch planner LLM
+        p_llm = patch('shail.orchestration.master_planner.ChatOllama')
+        mock_llm = p_llm.start()
+        mock_llm.return_value.invoke.return_value.content = '{"agent": "code", "confidence": 0.8, "rationale": "Symbiotic Loop detected anomaly: Traceback"}'
+        self.patchers.append(p_llm)
+        
+        # 3. Patch detective LLM
+        p_det_llm = patch('shail.agents.detective_agent.ChatOllama')
+        mock_det_llm = p_det_llm.start()
+        mock_det_llm.return_value.invoke.return_value.content = '{"passed": true, "anomalies": [], "bug_narrative": "", "confidence": 1.0}'
+        self.patchers.append(p_det_llm)
+        
+        self.planner = MasterPlanner()
+        
+        # Populate mock events in the buffer for testing
+        from shail.core.types import AccessibilityEvent
+        import time
+        ev = AccessibilityEvent(
+            ts=time.time(),
+            app_name="Terminal",
+            role="AXStaticText",
+            label="Traceback",
+            value="runtime error: TimeoutError",
+            focused=True,
+            metadata={}
+        )
+        self.planner.buffer.consent_granted = True
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        loop.run_until_complete(self.planner.buffer.add_accessibility_event(ev))
+
+    def tearDown(self):
+        for p in reversed(self.patchers):
+            p.stop()
 
     def test_symbiotic_error_flow(self):
         """

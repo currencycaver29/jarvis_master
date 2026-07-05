@@ -1,0 +1,12 @@
+{
+  "7ca0a679-68c2-404d-9bc6-a170dc4beb21": {
+    "trace_id": "7ca0a679-68c2-404d-9bc6-a170dc4beb21",
+    "task": "do something impossible",
+    "status": "failed",
+    "error": "API Rate Limit Exceeded",
+    "execution_time_ms": 0,
+    "result": null,
+    "retry_count": 0,
+    "skill_used": "skill_967ce981"
+  }
+}

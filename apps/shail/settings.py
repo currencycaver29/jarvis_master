@@ -17,10 +17,8 @@ else:
 class Settings(BaseModel):
     # Local LLM (Ollama)
     ollama_base_url: str = Field(default=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"))
-    # Sprint 6 (ADR-006): switched default from gemma4:e4b (9.6 GB, multimodal)
-    # to gemma3:4b Q4_K_M (~2.6 GB, text-only). Lazy-load llava for Ghost
-    # Cursor vision separately. Idle footprint drops 7 GB.
-    ollama_chat_model: str = Field(default=os.getenv("OLLAMA_CHAT_MODEL", "gemma3:4b-it-q4_K_M"))
+    # Using llama3.2 for local LLM - fast and capable
+    ollama_chat_model: str = Field(default=os.getenv("OLLAMA_CHAT_MODEL", "llama3.2"))
     ollama_vision_model: str = Field(default=os.getenv("OLLAMA_VISION_MODEL", "llava:7b"))
     ollama_embed_model: str = Field(default=os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text"))
     ollama_embed_dim: int = Field(default=int(os.getenv("OLLAMA_EMBED_DIM", "768")))
