@@ -181,13 +181,22 @@ def init_auth_db() -> None:
                 PRIMARY KEY (user_id, provider)
             );
 
-            -- Per-user, per-provider preferences (e.g. Gmail label selection).
             CREATE TABLE IF NOT EXISTS mcp_settings (
                 user_id     TEXT NOT NULL,
                 provider    TEXT NOT NULL,
                 settings    TEXT NOT NULL,              -- JSON
                 updated_at  TEXT NOT NULL,
                 PRIMARY KEY (user_id, provider)
+            );
+
+            CREATE TABLE IF NOT EXISTS hermes_sessions (
+                shail_task_id      TEXT PRIMARY KEY,
+                hermes_session_id  TEXT NOT NULL,
+                workspace_id       TEXT NOT NULL,
+                ui_origin          TEXT NOT NULL,
+                status             TEXT DEFAULT 'queued',
+                created_at         TEXT NOT NULL,
+                updated_at         TEXT NOT NULL
             );
         """)
         # Forward-compat ALTERs — safe no-op if column already exists.
@@ -200,6 +209,9 @@ def init_auth_db() -> None:
             "ALTER TABLE user_settings ADD COLUMN active_model TEXT DEFAULT ''",
             # MCP incremental sync: opaque cursor per provider (ISO ts or page token)
             "ALTER TABLE mcp_connections ADD COLUMN sync_cursor TEXT",
+            # Phase 3: Task Blueprints and Checkpoints columns for Hermes tasks
+            "ALTER TABLE hermes_sessions ADD COLUMN blueprint TEXT",
+            "ALTER TABLE hermes_sessions ADD COLUMN checkpoints TEXT",
         ):
             try:
                 con.execute(ddl)

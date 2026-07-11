@@ -31,6 +31,8 @@ def _registrars() -> List[Tuple[str, str, str]]:
         ("vscode", "shail.integrations.local.vscode.adapter", "register_vscode_tools"),
         ("terminal", "shail.integrations.local.terminal.adapter", "register_terminal_tools"),
         ("filesystem", "shail.integrations.local.filesystem.adapter", "register_filesystem_tools"),
+        ("context", "shail.integrations.tools.context_tools", "register_context_tools"),
+        ("browser", "shail.integrations.tools.browser_tools", "register_browser_tools"),
     ]
 
 

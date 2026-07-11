@@ -70,6 +70,35 @@ class HermesAdapter:
         """
         timeout = timeout or self.config.default_timeout_sec
         
+        # ── Permission / Consent Approval Gate (Phase 1) ──
+        try:
+            from apps.shail.agent_api import is_command_safe, wait_for_approval, active_request_id
+            request_id = active_request_id.get()
+            if request_id and not is_command_safe(command):
+                # Emit approval requirement event
+                await self.observability.emit_event("approval.required", {
+                    "tool_name": "run_command",
+                    "arguments": {"command": command},
+                    "risk_rationale": "Terminal command execution outside safe allowlist."
+                })
+                # Wait for user approval
+                approved = await wait_for_approval(request_id)
+                if not approved:
+                    await self.observability.emit_event("tool.rejected", {
+                        "command": command,
+                        "error": "Execution rejected by user."
+                    })
+                    return {
+                        "success": False,
+                        "stdout": "",
+                        "stderr": "Execution rejected by user.",
+                        "returncode": -1,
+                        "execution_time_ms": 0,
+                        "timed_out": False
+                    }
+        except Exception as e:
+            logger.debug(f"Approval gating check failed: {e}")
+
         await self.observability.emit_event("sandbox_start", {"command": command[:200], "use_python": use_python})
         
         if use_python:
@@ -82,6 +111,25 @@ class HermesAdapter:
             "timed_out": result.timed_out,
             "execution_time_ms": result.execution_time_ms
         })
+
+        # ── Step Checkpointing Hook (Phase 3) ──
+        try:
+            from apps.shail.agent_api import active_request_id, save_checkpoint, get_checkpoint
+            request_id = active_request_id.get()
+            if request_id:
+                from datetime import datetime, timezone
+                current = get_checkpoint(request_id) or {"steps": [], "plan": []}
+                current["steps"].append({
+                    "command": command,
+                    "use_python": use_python,
+                    "success": result.success,
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                })
+                save_checkpoint(request_id, current)
+        except Exception as e:
+            logger.debug(f"Step checkpoint serialization failed: {e}")
 
         # ── Permission Recovery Hook ──
         if not result.success and "Permission denied" in result.stderr:

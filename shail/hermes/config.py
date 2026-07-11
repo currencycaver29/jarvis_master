@@ -63,7 +63,15 @@ def get_hermes_config() -> HermesConfig:
     """Get Hermes configuration singleton."""
     global _hermes_config
     if _hermes_config is None:
-        _hermes_config = HermesConfig()
+        try:
+            from apps.shail.settings import get_settings
+            s = get_settings()
+            _hermes_config = HermesConfig(
+                ollama_endpoint=s.ollama_base_url,
+                default_model=s.ollama_chat_model
+            )
+        except Exception:
+            _hermes_config = HermesConfig()
     return _hermes_config
 
 

@@ -35,8 +35,16 @@ class HermesObservability:
 
     async def emit_event(self, event_type: str, data: Dict[str, Any]):
         """
-        Emit a Hermes event to the WebSocket server.
+        Emit a Hermes event to the WebSocket server and the Agent Gateway SSE stream.
         """
+        try:
+            from apps.shail.agent_api import publish_task_event, active_request_id
+            req_id = data.get("request_id") or data.get("task_id") or active_request_id.get()
+            if req_id:
+                publish_task_event(req_id, event_type, data)
+        except Exception as e:
+            logger.debug(f"Failed to publish task event to SSE: {e}")
+
         ws_manager = self._get_ws_manager()
         if not ws_manager:
             return

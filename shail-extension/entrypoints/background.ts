@@ -561,3 +561,106 @@ export default defineBackground(() => {
     }
   });
 });
+
+// ─── Browser Action Bridge (Phase 2) ──────────────────────────────────────────
+
+function connectToAgentBridge() {
+  const ws = new WebSocket('ws://127.0.0.1:8000/api/agent/browser/ws');
+  
+  ws.onopen = () => {
+    console.log('[SHAIL Bridge] Connected to Browser Action Bridge');
+  };
+  
+  ws.onmessage = async (event) => {
+    let msg: any;
+    try {
+      msg = JSON.parse(event.data);
+    } catch (err) {
+      console.warn('[SHAIL Bridge] Failed to parse message:', err);
+      return;
+    }
+    
+    const { command_id, action } = msg;
+    let responsePayload: any = {};
+    
+    try {
+      if (action === 'open_url') {
+        const tab = await chrome.tabs.create({ url: msg.url });
+        responsePayload = { status: 'success', tabId: tab.id };
+      } else if (action === 'read_page') {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab?.id) throw new Error('No active tab found');
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: () => document.body.innerText
+        });
+        responsePayload = { status: 'success', text: results[0]?.result };
+      } else if (action === 'click_element') {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab?.id) throw new Error('No active tab found');
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: (sel) => {
+            const el = document.querySelector(sel) as HTMLElement;
+            if (!el) throw new Error(`Element not found: ${sel}`);
+            el.click();
+          },
+          args: [msg.selector]
+        });
+        responsePayload = { status: 'success' };
+      } else if (action === 'type_text') {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab?.id) throw new Error('No active tab found');
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: (sel, text) => {
+            const el = document.querySelector(sel) as HTMLInputElement;
+            if (!el) throw new Error(`Element not found: ${sel}`);
+            el.value = text;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+          },
+          args: [msg.selector, msg.text]
+        });
+        responsePayload = { status: 'success' };
+      } else if (action === 'scroll_page') {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab?.id) throw new Error('No active tab found');
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: (dir) => {
+            const distance = dir === 'down' ? window.innerHeight : -window.innerHeight;
+            window.scrollBy(0, distance);
+          },
+          args: [msg.direction || 'down']
+        });
+        responsePayload = { status: 'success' };
+      } else if (action === 'wait_for_state') {
+        await new Promise((resolve) => setTimeout(resolve, (msg.seconds || 5) * 1000));
+        responsePayload = { status: 'success' };
+      } else {
+        throw new Error(`Unknown action: ${action}`);
+      }
+    } catch (err) {
+      responsePayload = { status: 'error', error: (err as Error).message };
+    }
+    
+    try {
+      ws.send(JSON.stringify({ command_id, ...responsePayload }));
+    } catch (sendErr) {
+      console.warn('[SHAIL Bridge] Failed to send response back to bridge:', sendErr);
+    }
+  };
+  
+  ws.onclose = () => {
+    console.log('[SHAIL Bridge] Connection closed. Retrying in 5s...');
+    setTimeout(connectToAgentBridge, 5000);
+  };
+  
+  ws.onerror = (err) => {
+    console.error('[SHAIL Bridge] WebSocket error:', err);
+  };
+}
+
+// Start connection loop
+connectToAgentBridge();

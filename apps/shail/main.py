@@ -58,6 +58,7 @@ from apps.shail.auth_api import auth_router, get_current_user, get_user_or_local
 from apps.shail.auth_store import init_auth_db
 from apps.shail.memory_dashboard_api import dashboard_router
 from apps.shail.macos_memory_api import memory_router, path_idx_router
+from apps.shail.agent_api import agent_router
 from apps.shail.llm import call_llm
 from shail.core.task_classifier import classify
 import uuid
@@ -334,6 +335,7 @@ app.include_router(mcp_router, prefix="/mcp", tags=["mcp"])
 app.include_router(dashboard_router, prefix="/api/v2", tags=["dashboard"])
 app.include_router(memory_router, prefix="/memory", tags=["memory"])
 app.include_router(path_idx_router, prefix="/path-index", tags=["path-index"])
+app.include_router(agent_router)
 
 from apps.shail.system_api import system_router  # noqa: E402
 app.include_router(system_router, prefix="/system", tags=["system"])

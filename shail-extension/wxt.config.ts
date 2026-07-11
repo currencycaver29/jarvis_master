@@ -9,7 +9,7 @@ export default defineConfig({
     permissions: ['tabs', 'activeTab', 'storage', 'scripting', 'sidePanel'],
     host_permissions: ['<all_urls>', 'http://localhost/*', 'http://127.0.0.1/*'],
     content_security_policy: {
-      extension_pages: "script-src 'self'; object-src 'self'; connect-src http://localhost:8000 http://127.0.0.1:8000",
+      extension_pages: "script-src 'self'; object-src 'self'; connect-src http://localhost:8000 http://127.0.0.1:8000 ws://localhost:8000 ws://127.0.0.1:8000",
     },
     commands: {
       // Ctrl+Space (Win/Linux) / Control+Space (Mac) → open memory side panel.
